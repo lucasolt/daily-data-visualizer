@@ -89,7 +89,7 @@ ACTIVITY_LABELS = {
 }
 
 
-# ---------------------------------------------------------------- helpers
+# ---------------------------------------------------------------- helpers numéricos
 
 def _to_num(series: pd.Series) -> pd.Series:
     """Converte série com decimal em vírgula pra float."""
@@ -124,6 +124,73 @@ def hours_to_label(x: float) -> str:
     return f"{int(x):02d}:{int(round((x - int(x)) * 60)):02d}"
 
 
+# ---------------------------------------------------------------- fases
+
+def fase_label(v) -> str:
+    """Rótulo canônico de uma célula de fase."""
+    if pd.isna(v):
+        return "(sem fase)"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v).strip()
+
+
+def fase_sort_key(label: str):
+    """Ordena fases numericamente; rótulos não-numéricos e '(sem fase)' no fim."""
+    try:
+        return (0, float(label), "")
+    except ValueError:
+        return (1, 0.0, label)
+
+
+def fase_order(labels) -> list[str]:
+    return sorted(set(labels), key=fase_sort_key)
+
+
+def phase_change_points(df: pd.DataFrame, fase_col: str = "fase_label"):
+    """Datas em que a fase muda, no df já ordenado por data.
+
+    Retorna lista de dicts: {date, from, to}. Ignora a primeira linha
+    (não há transição antes dela). Robusto a período não-contíguo:
+    detecta a mudança no ponto em que o rótulo difere do anterior.
+    """
+    if fase_col not in df.columns or df.empty:
+        return []
+    out = []
+    prev = None
+    for d, lab in zip(df["date"], df[fase_col]):
+        if prev is not None and lab != prev:
+            out.append({"date": d, "from": prev, "to": lab})
+        prev = lab
+    return out
+
+
+# ---------------------------------------------------------------- medicação
+
+def med_dose_used(df: pd.DataFrame, med: str):
+    """Retorna (dose, used): série de mg (zeros = não-uso) e indicador binário."""
+    dose = df[med].fillna(0.0)
+    used = (dose > 0).astype(int)
+    return dose, used
+
+
+def med_varies_within_use(df: pd.DataFrame, med: str, min_used: int = 4) -> bool:
+    """True se o fármaco tem dose variável (titulado) entre os dias de uso.
+    Usado pra decidir se 'titulação' é um modo informativo pra esse fármaco."""
+    dose, _ = med_dose_used(df, med)
+    used = dose[dose > 0]
+    return used.nunique() >= 2 and len(used) >= min_used
+
+
+def active_meds(df: pd.DataFrame, min_days: int = 1) -> list[str]:
+    """Medicações com uso (>0) em pelo menos `min_days` dias."""
+    out = []
+    for col in MED_COLS:
+        if col in df.columns and (df[col].fillna(0) > 0).sum() >= min_days:
+            out.append(col)
+    return out
+
+
 # ---------------------------------------------------------------- carga
 
 def load_csv(source) -> pd.DataFrame:
@@ -146,6 +213,11 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = _to_num(df[col])
 
+    # decisão explícita: 0 e missing são equivalentes (= não-uso) para fármacos.
+    for col in MED_COLS:
+        if col in df.columns:
+            df[col] = df[col].fillna(0.0)
+
     for col in DURATION_COLS:
         if col in df.columns:
             df[col + "_h"] = _hhmm_to_hours(df[col])
@@ -155,6 +227,12 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
             df[col + "_h"] = _clock_to_hours(df[col])
     if "wake_time" in df.columns:
         df["wake_time_h"] = _hhmm_to_hours(df["wake_time"])
+
+    # rótulo de fase canônico (sempre presente; "(sem fase)" se ausente/NaN)
+    if "fase" in df.columns:
+        df["fase_label"] = df["fase"].map(fase_label)
+    else:
+        df["fase_label"] = "(sem fase)"
 
     # texto consolidado pra hover
     obs_present = [c for c in OBS_COLS if c in df.columns]
@@ -167,12 +245,3 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     df["obs_all"] = df.apply(join_obs, axis=1) if obs_present else ""
 
     return df
-
-
-def active_meds(df: pd.DataFrame, min_days: int = 1) -> list[str]:
-    """Medicações com uso (>0) em pelo menos `min_days` dias."""
-    out = []
-    for col in MED_COLS:
-        if col in df.columns and (df[col].fillna(0) > 0).sum() >= min_days:
-            out.append(col)
-    return out
