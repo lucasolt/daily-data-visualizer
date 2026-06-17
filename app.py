@@ -25,13 +25,19 @@ st.set_page_config(page_title="Níveis diários", page_icon="📈", layout="wide
 OK = {
     "orange": "#E69F00",
     "skyblue": "#56B4E9",
-    "green": "#009E73",
+    "green": "#00C896",
     "yellow": "#F0E442",
-    "blue": "#0072B2",
-    "vermillion": "#D55E00",
-    "purple": "#CC79A7",
-    "grey": "#7F7F7F",
+    "blue": "#4C9BE8",
+    "vermillion": "#EF6351",
+    "purple": "#D395C8",
+    "grey": "#888888",
     "black": "#1A1A1A",
+    # dark theme surfaces
+    "bg":      "#0E1117",   # fundo do papel (igual ao Streamlit dark)
+    "surface": "#1A1D27",   # fundo do plot area
+    "grid":    "rgba(255,255,255,0.07)",
+    "text":    "#E0E0E0",
+    "subtext": "#9AA0B2",
 }
 
 PALETTE = {
@@ -53,35 +59,41 @@ SEQ = "Teal"
 
 FONT = "Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
 
-# template global
-_base = pio.templates["plotly_white"]
-_base.layout.font = dict(family=FONT, size=13, color=OK["black"])
-_base.layout.title.font = dict(family=FONT, size=16)
+# template global — dark
+_base = pio.templates["plotly_dark"]
+_base.layout.font = dict(family=FONT, size=13, color=OK["text"])
+_base.layout.title.font = dict(family=FONT, size=16, color=OK["text"])
+_base.layout.paper_bgcolor = OK["bg"]
+_base.layout.plot_bgcolor  = OK["surface"]
 _base.layout.colorway = [
     OK["blue"], OK["orange"], OK["green"], OK["vermillion"],
     OK["purple"], OK["skyblue"], OK["yellow"], OK["grey"],
 ]
-pio.templates.default = "plotly_white"
+pio.templates.default = "plotly_dark"
 
 
 def style_fig(fig, height=None, legend_top=True):
-    """Aplica acabamento consistente: grid suave, hover legível, legenda no topo."""
+    """Aplica acabamento consistente dark: grid suave, hover legível, legenda no topo."""
     fig.update_layout(
-        font=dict(family=FONT, size=13, color=OK["black"]),
-        hoverlabel=dict(font=dict(family=FONT, size=12), bgcolor="white"),
+        font=dict(family=FONT, size=13, color=OK["text"]),
+        hoverlabel=dict(font=dict(family=FONT, size=12), bgcolor=OK["surface"],
+                        font_color=OK["text"], bordercolor=OK["grid"]),
         margin=dict(t=54, b=28, l=10, r=10),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
+        plot_bgcolor=OK["surface"],
+        paper_bgcolor=OK["bg"],
     )
     if height:
         fig.update_layout(height=height)
     if legend_top:
         fig.update_layout(legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-            bgcolor="rgba(255,255,255,0.6)",
+            bgcolor="rgba(0,0,0,0.0)",
+            font=dict(color=OK["text"]),
         ))
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.06)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.06)", zeroline=False)
+    fig.update_xaxes(showgrid=True, gridcolor=OK["grid"], zeroline=False,
+                     color=OK["subtext"], linecolor=OK["grid"])
+    fig.update_yaxes(showgrid=True, gridcolor=OK["grid"], zeroline=False,
+                     color=OK["subtext"], linecolor=OK["grid"])
     return fig
 
 
@@ -95,7 +107,7 @@ def add_phase_vlines(fig, change_points, subplot=False, annotate=True):
     rc = dict(row="all", col="all") if subplot else {}
     for cp in change_points:
         fig.add_vline(
-            x=cp["date"], line=dict(color="rgba(0,0,0,0.45)", width=1.2, dash="dot"),
+            x=cp["date"], line=dict(color="rgba(255,255,255,0.35)", width=1.2, dash="dot"),
             **rc,
         )
     if annotate:
@@ -103,8 +115,8 @@ def add_phase_vlines(fig, change_points, subplot=False, annotate=True):
             fig.add_annotation(
                 x=cp["date"], y=1.0, yref="paper", yanchor="bottom",
                 text=f"fase {cp['to']}", showarrow=False,
-                font=dict(size=10, color="rgba(0,0,0,0.6)"),
-                bgcolor="rgba(255,255,255,0.7)",
+                font=dict(size=10, color=OK["subtext"]),
+                bgcolor="rgba(0,0,0,0.45)",
             )
     return fig
 
@@ -614,8 +626,9 @@ with tab_corr:
             z=corr.values, x=corr.columns, y=corr.columns,
             zmin=-1, zmax=1, colorscale=DIVERGING,
             text=np.round(corr.values, 2), texttemplate="%{text}",
-            textfont=dict(size=11),
-            colorbar=dict(title="ρ / r"),
+            textfont=dict(size=11, color=OK["text"]),
+            colorbar=dict(title=dict(text="ρ / r", font=dict(color=OK["subtext"])),
+                          tickfont=dict(color=OK["subtext"])),
         ))
         style_fig(fig, height=140 + 42 * len(matrix_cols), legend_top=False)
         st.plotly_chart(fig, width="stretch")
