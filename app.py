@@ -16,6 +16,8 @@ from scipy import stats as sps
 
 import data_prep as dp
 
+from phase_report import build_phase_report
+
 st.set_page_config(page_title="Níveis diários", page_icon="📈", layout="wide")
 
 # ---------------------------------------------------------------- tema / paleta
@@ -239,8 +241,8 @@ def med_label(m: str) -> str:
 
 # ---------------------------------------------------------------- tabs
 
-tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_dados = st.tabs(
-    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações", "Dados"]
+tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_fases, tab_dados = st.tabs(
+    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações", "Fases", "Dados"]
 )
 
 # ------------------------------------------------ visão geral
@@ -644,3 +646,17 @@ with tab_dados:
         "niveis_diarios_processado.csv",
         "text/csv",
     )
+
+# ------------------------------------------------ fases
+with tab_fases:
+    if not has_fase or df["fase_label"].nunique() < 2:
+        st.info("Nenhuma fase detectada nos dados do período selecionado.")
+    else:
+        report_html = build_phase_report(df)
+        st.iframe(report_html, height=1200)
+        st.download_button(
+            "⬇ Baixar relatório HTML",
+            report_html.encode("utf-8"),
+            "relatorio_fases.html",
+            "text/html",
+        )
