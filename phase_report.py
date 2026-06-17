@@ -225,10 +225,13 @@ def build_phase_report(df: pd.DataFrame) -> str:
     ])
 
     # ---- regime medicamentoso por fase ----
+    # colunas manhã/tarde excluídas — só totais são exibidos
+    MED_EXCLUDE = {
+        "venvase_morning_mg", "venvanse_evening_mg",
+        "metilfenidato_mg", "metilfenidato_evening_mg",
+    }
     MED_COLORS = {
         "venvanse_mg_total":      ("#B5D4F4", "#0C447C", "Lisdexanfetamina"),
-        "venvase_morning_mg":     ("#B5D4F4", "#0C447C", "Lisd. manhã"),
-        "venvanse_evening_mg":    ("#A8C6E8", "#0C447C", "Lisd. tarde"),
         "bupropiona_mg":          ("#C0DD97", "#27500A", "Bupropiona"),
         "zolpidem_mg_total":      ("#FAC775", "#633806", "Zolpidem"),
         "fluvoxamina_mg":         ("#CECBF6", "#3C3489", "Fluvoxamina"),
@@ -244,11 +247,13 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
 
-    def med_pills_html(ph, min_days: int = 5):
+    def med_pills_html(ph, min_pct: float = 0.15):
         sub = phase_data[ph]
+        n_phase = len(sub)
+        threshold = max(1, n_phase * min_pct)
         parts = []
         for col_name, (bgc, fgc, label) in MED_COLORS.items():
-            if col_name in sub.columns and (sub[col_name] > 0).sum() >= min_days:
+            if col_name in sub.columns and (sub[col_name] > 0).sum() >= threshold:
                 parts.append(
                     f'<span class="mt" style="background:{bgc};color:{fgc}">{label}</span>'
                 )
