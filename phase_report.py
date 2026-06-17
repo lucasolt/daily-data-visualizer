@@ -247,7 +247,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
 
-    def med_pills_html(ph, min_pct: float = 0.15):
+    def med_pills_html(ph, min_pct: float = 0.5):
         sub = phase_data[ph]
         n_phase = len(sub)
         threshold = max(1, n_phase * min_pct)
