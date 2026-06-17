@@ -160,6 +160,15 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": "lower", "type": "single"}
 
+    def dual_num_row(label, col_name, direction, decimals=1, suffix=""):
+        """Mediana (principal) + μ média (auxiliar), mesmo padrão dos horários."""
+        medians = [_safe_median(col(col_name, ph)) for ph in phases]
+        means   = [_safe_mean(col(col_name, ph))   for ph in phases]
+        vals = [_fmt_val(n, decimals, suffix) for n in medians]
+        aux  = [f"μ {_fmt_val(m, decimals, suffix)}" for m in means]
+        return {"label": label, "vals": vals, "aux": aux,
+                "nums": medians, "dir": direction, "type": "dual"}
+
     # scores
     score_rows = []
     score_map = {
@@ -171,7 +180,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
     }
     for col_name, (label, direction) in score_map.items():
         if col_name in df.columns:
-            score_rows.append(num_row(label, col_name, direction))
+            score_rows.append(dual_num_row(label, col_name, direction))
 
     sections = [
         build_section("Horários — mediana (principal) · μ média", [
@@ -187,24 +196,24 @@ def build_phase_report(df: pd.DataFrame) -> str:
             dur_row("Awake (sleep)",   "awake_sleep_h",    "lower"),
         ]),
         build_section("Qualidade", [
-            num_row("Sleep efficiency", "sleep_efficiency", "higher", 1, "%"),
+            dual_num_row("Sleep efficiency", "sleep_efficiency", "higher", 1, "%"),
             pct_row("Light %",  "light_sleep_h", "lower"),
             pct_row("REM %",    "rem_sleep_h",   "higher"),
             pct_row("Deep %",   "deep_sleep_h",  "higher"),
         ]),
         build_section("Perturbações (mediana)", [
-            num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
-            num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
-            num_row("Interruption (min)",    "interruption_mins",   "lower"),
-            num_row("Full awakenings",       "full_awakenings",     "lower", 2),
+            dual_num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
+            dual_num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
+            dual_num_row("Interruption (min)",    "interruption_mins",   "lower"),
+            dual_num_row("Full awakenings",       "full_awakenings",     "lower", 2),
         ]),
         build_section("Cardíaco (mediana)", [
-            num_row("Avg BPM", "avg_bpm", "lower", 1),
-            num_row("VFC",     "VFC",     "higher", 1),
+            dual_num_row("Avg BPM", "avg_bpm", "lower", 1),
+            dual_num_row("VFC",     "VFC",     "higher", 1),
         ]),
         build_section("Atividade (mediana)", [
-            num_row("Passos",          "steps",        "higher", 0),
-            num_row("Exercício (min)", "exercise_mins","higher", 0),
+            dual_num_row("Passos",          "steps",        "higher", 0),
+            dual_num_row("Exercício (min)", "exercise_mins","higher", 0),
         ]),
     ]
     if score_rows:
@@ -235,11 +244,11 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
 
-    def med_pills_html(ph):
+    def med_pills_html(ph, min_days: int = 5):
         sub = phase_data[ph]
         parts = []
         for col_name, (bgc, fgc, label) in MED_COLORS.items():
-            if col_name in sub.columns and (sub[col_name] > 0).any():
+            if col_name in sub.columns and (sub[col_name] > 0).sum() >= min_days:
                 parts.append(
                     f'<span class="mt" style="background:{bgc};color:{fgc}">{label}</span>'
                 )
