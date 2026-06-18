@@ -241,8 +241,8 @@ def med_label(m: str) -> str:
 
 # ---------------------------------------------------------------- tabs
 
-tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_fases, tab_dados = st.tabs(
-    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações", "Fases", "Dados"]
+tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_emo, tab_fases, tab_dados = st.tabs(
+    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações", "Emoções", "Fases", "Dados"]
 )
 
 # ------------------------------------------------ visão geral
@@ -548,70 +548,154 @@ with tab_corr:
 
     # ---- regressão multivariável ----
     st.markdown("---")
-    st.markdown("##### Regressão (OLS)")
+    st.markdown("##### Regressão (OLS) com transformações")
     st.caption(
-        "Modelo descritivo, não causal. Com poucos dias por fase os coeficientes "
-        "são instáveis — leia os n por fase abaixo antes de interpretar."
+        "Modelo descritivo, não causal. Séries diárias são autocorrelacionadas — "
+        "use AR(1) ou Δ pra não inflar a significância. Leia os n por fase antes de interpretar."
     )
     reg_y = st.selectbox("Desfecho (Y)", num_cols,
                          index=num_cols.index("mood_score") if "mood_score" in num_cols else 0,
                          key="reg_y")
-    pred_default = [c for c in ["sleep_duration_h"] if c in num_cols and c != reg_y]
-    reg_x = st.multiselect("Preditores numéricos", [c for c in num_cols if c != reg_y],
-                           default=pred_default)
-    include_fase = st.checkbox(
-        "Incluir fase como categórica  C(fase)", value=False, disabled=not has_fase,
-        help="Captura deslocamentos de nível entre fases.",
+
+    # AR(1) e Δ-no-alvo são estratégias concorrentes p/ a mesma autocorrelação → exclusivas
+    target_mode = st.radio(
+        "Transformação do alvo / autocorrelação",
+        ["Nível (cru)", "AR(1): incluir Y(t-1)", "Δ alvo (primeira diferença)"],
+        horizontal=True,
+        help="Nível = Y bruto. AR(1) adiciona Y de ontem como preditor (controla a inércia). "
+        "Δ modela a variação diária de Y. AR(1) e Δ são mutuamente exclusivos de propósito.",
     )
+
+    pred_default = [c for c in ["sleep_duration_h"] if c in num_cols and c != reg_y]
+    reg_x = st.multiselect("Preditores", [c for c in num_cols if c != reg_y],
+                           default=pred_default)
+
+    # transformação por preditor (lag e/ou média móvel próprios)
+    pred_cfg = {}
+    if reg_x:
+        st.caption("Transformação por preditor (lag = dias atrás; MM = média móvel de N dias até o dia):")
+        for c in reg_x:
+            cc1, cc2, cc3 = st.columns([3, 1, 1])
+            cc1.markdown(f"&nbsp;**{med_label(c)}**", unsafe_allow_html=True)
+            lg = cc2.number_input("lag", 0, 14, 0, key=f"lag_{c}")
+            mm = cc3.number_input("MM", 1, 28, 1, key=f"mm_{c}",
+                                  help="1 = sem média móvel")
+            pred_cfg[c] = (int(lg), int(mm))
+
+    cctrl1, cctrl2 = st.columns(2)
+    include_fase = cctrl1.checkbox(
+        "Incluir fase  C(fase)", value=False, disabled=not has_fase,
+        help="Deslocamentos de nível entre fases.",
+    )
+    ctrl_trend = cctrl1.checkbox(
+        "Tendência linear (trend)", value=False,
+        help="Dia-índice como preditor. Sem isso, duas variáveis que só melhoram no tempo "
+        "correlacionam espúrio.",
+    )
+    ctrl_weekend = cctrl2.checkbox("Dummy fim de semana", value=False)
+    ctrl_monday = cctrl2.checkbox("Dummy segunda-feira", value=False)
 
     if st.button("Rodar regressão"):
         try:
-            import statsmodels.formula.api as smf
+            import statsmodels.api as sm
         except ImportError:
             st.error("statsmodels não instalado. Adicione `statsmodels` ao requirements.txt.")
             st.stop()
 
-        if not reg_x and not include_fase:
-            st.warning("Escolha ao menos um preditor (ou marque a fase).")
+        if not reg_x and not include_fase and target_mode == "Nível (cru)" and not (
+            ctrl_trend or ctrl_weekend or ctrl_monday):
+            st.warning("Escolha ao menos um preditor ou uma transformação.")
         else:
-            d = df.copy()
-            d = d.rename(columns={"fase_label": "fase_lab"})
-            # checa colinearidade fase × preditor (constante dentro de cada fase)
-            collinear = []
-            if include_fase:
-                for col in reg_x:
-                    g = d.groupby("fase_lab")[col].nunique(dropna=True)
+            d = df.sort_values("date").reset_index(drop=True).copy()
+
+            # ---- monta o alvo ----
+            y = d[reg_y].astype(float)
+            y_name = reg_y
+            if target_mode.startswith("Δ"):
+                y = y.diff()
+                y_name = f"Δ{reg_y}"
+
+            reg = pd.DataFrame({y_name: y})
+            built, collinear = [], []
+
+            # ---- AR(1) ----
+            if target_mode.startswith("AR"):
+                ar_name = f"{reg_y}__lag1"
+                reg[ar_name] = d[reg_y].astype(float).shift(1)
+                built.append(ar_name)
+
+            # ---- preditores transformados ----
+            for c in reg_x:
+                lg, mm = pred_cfg[c]
+                s = d[c].astype(float)
+                if mm > 1:
+                    s = s.rolling(mm, min_periods=max(2, mm // 2)).mean()
+                if lg > 0:
+                    s = s.shift(lg)
+                nm = c + (f"_mm{mm}" if mm > 1 else "") + (f"_lag{lg}" if lg > 0 else "")
+                reg[nm] = s
+                built.append(nm)
+                # colinearidade com fase (constante dentro de cada fase)
+                if include_fase:
+                    g = d.assign(_v=s).groupby("fase_label")["_v"].nunique(dropna=True)
                     if (g.fillna(0) <= 1).all():
-                        collinear.append(col)
+                        collinear.append(med_label(c))
+
+            # ---- controles temporais ----
+            if ctrl_trend:
+                reg["trend"] = np.arange(len(d), dtype=float)
+                built.append("trend")
+            if ctrl_weekend:
+                reg["weekend"] = (d["date"].dt.weekday >= 5).astype(float)
+                built.append("weekend")
+            if ctrl_monday:
+                reg["monday"] = (d["date"].dt.weekday == 0).astype(float)
+                built.append("monday")
+
+            # ---- fase como dummies ----
+            fase_cols = []
+            if include_fase:
+                dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                for col in dummies.columns:
+                    reg[col] = dummies[col].values
+                fase_cols = list(dummies.columns)
+                built += fase_cols
+
             if collinear:
                 st.warning(
                     "⚠️ Colinear com a fase (constante dentro de cada fase): "
-                    + ", ".join(med_label(c) for c in collinear)
-                    + ". O efeito desses preditores não é separável do efeito de fase — "
-                    "o coeficiente abaixo é arbitrário/instável. Remova-os OU tire a fase do modelo."
+                    + ", ".join(collinear)
+                    + ". O efeito desses preditores não é separável do da fase — "
+                    "coeficiente instável. Remova-os OU tire a fase."
                 )
-            terms = list(reg_x) + (["C(fase_lab)"] if include_fase else [])
-            formula = f"{reg_y} ~ " + " + ".join(terms)
-            sub = d[[reg_y] + reg_x + (["fase_lab"] if include_fase else [])].dropna()
-            if len(sub) < len(terms) + 2:
-                st.warning(f"Poucas observações completas (n = {len(sub)}) pra {len(terms)} termos.")
+
+            reg = reg.dropna()
+            k = len(built)
+            if len(reg) < k + 2:
+                st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos. "
+                           "Lags e médias móveis grandes cortam linhas do começo da série.")
             else:
-                res = smf.ols(formula, data=sub).fit()
+                X = sm.add_constant(reg[built], has_constant="add")
+                res = sm.OLS(reg[y_name], X).fit()
                 coefs = pd.DataFrame({
                     "coef": res.params, "EP": res.bse,
                     "t": res.tvalues, "p": res.pvalues,
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
                 st.dataframe(coefs, width="stretch")
+                terms_txt = " + ".join(built) if built else "const"
                 st.caption(
-                    f"`{formula}` · n = {int(res.nobs)} · R² = {res.rsquared:.3f} · "
+                    f"`{y_name} ~ {terms_txt}` · n = {int(res.nobs)} · R² = {res.rsquared:.3f} · "
                     f"R² aj. = {res.rsquared_adj:.3f} · F p = {res.f_pvalue:.3g} · "
                     f"nº de condição = {res.condition_number:.0f}"
                     + ("  (alto → multicolinearidade)" if res.condition_number > 100 else "")
                 )
+                if target_mode.startswith("AR"):
+                    st.caption("AR(1): o coeficiente de Y(t-1) capta a inércia; os demais são efeitos "
+                               "*além* da persistência do próprio Y.")
                 if include_fase:
-                    npf = d.dropna(subset=[reg_y]).groupby("fase_lab")[reg_y].size()
-                    st.caption("n por fase: " + " · ".join(f"{k}: {v}" for k, v in npf.items()))
+                    npf = d.groupby("fase_label")[reg_y].size()
+                    st.caption("n por fase: " + " · ".join(f"{k_}: {v}" for k_, v in npf.items()))
 
     # ---- matriz de correlação ----
     st.markdown("---")
@@ -646,6 +730,97 @@ with tab_dados:
         "niveis_diarios_processado.csv",
         "text/csv",
     )
+
+    with st.expander("Distribuição de uma variável"):
+        var = st.selectbox("Variável", num_cols,
+                           index=num_cols.index("mood_score") if "mood_score" in num_cols else 0,
+                           key="hist_var")
+        s = df[var].astype(float)
+        only_use = False
+        if var in set(meds):
+            only_use = st.checkbox("Só dias em uso (dose > 0)", value=True, key="hist_use")
+            if only_use:
+                s = s[s > 0]
+        s = s.dropna()
+        if len(s) >= 3:
+            nbins = st.slider("Bins", 5, 60, min(30, max(5, len(s) // 3)), key="hist_bins")
+            fig = go.Figure(go.Histogram(x=s, nbinsx=nbins, marker_color=OK["blue"],
+                                         marker_line=dict(width=0.5, color=OK["surface"])))
+            fig.add_vline(x=s.mean(), line=dict(color=OK["orange"], width=2),
+                          annotation_text=f"μ {s.mean():.1f}", annotation_position="top")
+            fig.add_vline(x=s.median(), line=dict(color=OK["green"], width=2, dash="dash"),
+                          annotation_text=f"md {s.median():.1f}", annotation_position="bottom")
+            style_fig(fig, height=340, legend_top=False)
+            fig.update_layout(xaxis_title=var + (" · só dias em uso" if only_use else ""),
+                              yaxis_title="dias", bargap=0.05)
+            st.plotly_chart(fig, width="stretch")
+            desc = s.describe()
+            st.caption(
+                f"n = {int(desc['count'])} · μ = {desc['mean']:.2f} · md = {s.median():.2f} · "
+                f"dp = {desc['std']:.2f} · min = {desc['min']:.2f} · "
+                f"p25 = {desc['25%']:.2f} · p75 = {desc['75%']:.2f} · máx = {desc['max']:.2f}"
+            )
+        else:
+            st.info("Poucos valores pra histograma.")
+
+# ------------------------------------------------ emoções
+with tab_emo:
+    vocab_all = dp.emotion_vocabulary(df)
+    if not vocab_all:
+        st.info("Sem coluna `emotion_keywords` com dados no período.")
+    else:
+        st.caption(
+            "Frequência de cada emoção ao longo do tempo: para cada dia, 1 se a emoção foi "
+            "registrada, 0 se não. A linha é a média móvel dessa série — proporção de dias "
+            "com a emoção numa janela. Captura ondas, não causa."
+        )
+        c1, c2 = st.columns([3, 1])
+        default_top = vocab_all[:min(6, len(vocab_all))]
+        chosen_emo = c1.multiselect(
+            "Emoções", vocab_all, default=default_top,
+            format_func=lambda e: f"{e}",
+            help="Ordenadas por frequência. Default: as mais frequentes.",
+        )
+        emo_roll = c2.number_input("Janela MM (dias)", 3, 28, max(7, roll), key="emo_roll")
+
+        if chosen_emo:
+            pf = dp.emotion_presence_frame(df, chosen_emo)
+            cmap = [OK["blue"], OK["orange"], OK["green"], OK["vermillion"],
+                    OK["purple"], OK["skyblue"], OK["yellow"], OK["grey"]]
+            fig = go.Figure()
+            for i, e in enumerate(chosen_emo):
+                color = cmap[i % len(cmap)]
+                roll_series = pf[e].rolling(emo_roll, min_periods=max(2, emo_roll // 3)).mean() * 100
+                # pontos crus discretos (0/100%) bem leves
+                fig.add_trace(go.Scatter(
+                    x=df["date"], y=pf[e] * 100, mode="markers",
+                    marker=dict(color=color, size=4, opacity=0.18),
+                    legendgroup=e, showlegend=False, hoverinfo="skip",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df["date"], y=roll_series, mode="lines",
+                    line=dict(color=color, width=2.6, shape="spline"),
+                    name=e, legendgroup=e,
+                    hovertemplate="%{y:.0f}% dos dias<extra>" + e + "</extra>",
+                ))
+            add_phase_vlines(fig, change_points)
+            style_fig(fig, height=460)
+            fig.update_layout(hovermode="x unified",
+                              yaxis_title=f"% de dias com a emoção (MM {emo_roll}d)",
+                              yaxis_range=[0, 100])
+            st.plotly_chart(fig, width="stretch")
+
+            # tabela de frequência total
+            freq = pd.DataFrame({
+                "emoção": chosen_emo,
+                "dias": [int(pf[e].sum()) for e in chosen_emo],
+                "% do período": [f"{pf[e].mean()*100:.1f}%" for e in chosen_emo],
+            })
+            st.caption(f"Vocabulário completo: {len(vocab_all)} emoções distintas. "
+                       f"Frequência das selecionadas no período ({len(df)} dias):")
+            st.dataframe(freq, width="stretch", hide_index=True)
+        else:
+            st.info("Selecione ao menos uma emoção.")
 
 # ------------------------------------------------ fases
 with tab_fases:
