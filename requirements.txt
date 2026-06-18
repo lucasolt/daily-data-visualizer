@@ -4,3 +4,4 @@ numpy
 plotly>=5.20
 scipy
 requests
+statsmodels
