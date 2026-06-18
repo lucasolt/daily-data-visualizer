@@ -77,6 +77,9 @@ def build_phase_report(df: pd.DataFrame) -> str:
     if "fase_label" not in df.columns or df["fase_label"].nunique() < 1:
         return "<p style='color:#9aa7b5'>Sem dados de fase disponíveis.</p>"
 
+    # limiar de inclusão de fármaco nos pills: usado em > PILL_MIN_PCT dos dias da fase
+    PILL_MIN_PCT = 0.50
+
     phases = dp.fase_order(df["fase_label"].unique())
     # remove "(sem fase)" se houver apenas ela
     phases = [p for p in phases if p != "(sem fase)"] or phases
@@ -247,15 +250,22 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
 
-    def med_pills_html(ph, min_pct: float = 0.50):
+    def med_pills_html(ph, min_pct: float = PILL_MIN_PCT):
         sub = phase_data[ph]
         n_phase = len(sub)
         threshold = max(1, n_phase * min_pct)
         parts = []
         for col_name, (bgc, fgc, label) in MED_COLORS.items():
             if col_name in sub.columns and (sub[col_name] > 0).sum() >= threshold:
+                # mediana da dose nos dias de uso (dose>0); regime estável por fase → vira a dose real
+                used = sub[col_name][sub[col_name] > 0]
+                dose = used.median()
+                dose_txt = ""
+                if not pd.isna(dose) and dose > 0:
+                    dnum = int(round(dose)) if float(dose).is_integer() or abs(dose - round(dose)) < 0.05 else round(dose, 1)
+                    dose_txt = f" {dnum} mg"
                 parts.append(
-                    f'<span class="mt" style="background:{bgc};color:{fgc}">{label}</span>'
+                    f'<span class="mt" style="background:{bgc};color:{fgc}">{label}{dose_txt}</span>'
                 )
         return "<br>".join(parts) if parts else "<span style='color:#666'>—</span>"
 
@@ -346,7 +356,7 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
     tbody += render_section(ctx_section)
 
     # regime meds
-    tbody += f'<tr class="sh"><td colspan="{n_phases+1}">Regime medicamentoso</td></tr>\n'
+    tbody += f'<tr class="sh"><td colspan="{n_phases+1}">Regime medicamentoso (fármacos usados em mais de {PILL_MIN_PCT*100:.0f}% dos dias)</td></tr>\n'
     tbody += '<tr><td class="lbl" style="vertical-align:top;padding:8px 10px;border-bottom:0"></td>'
     for ph in phases:
         tbody += f'<td style="text-align:left;vertical-align:top;padding:8px 10px;border-bottom:0">{med_pills_html(ph)}</td>'
