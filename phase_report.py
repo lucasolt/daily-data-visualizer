@@ -247,7 +247,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
 
-    def med_pills_html(ph, min_pct: float = 0.5):
+    def med_pills_html(ph, min_pct: float = 0.50):
         sub = phase_data[ph]
         n_phase = len(sub)
         threshold = max(1, n_phase * min_pct)
@@ -260,13 +260,15 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return "<br>".join(parts) if parts else "<span style='color:#666'>—</span>"
 
     def med_dose_html(ph, col_name):
+        """Média diária sobre TODOS os dias da fase (dias sem uso entram como 0).
+        Exposição média/dia — distinto da titulação (só dias de uso) usada nas correlações."""
         sub = phase_data[ph]
         if col_name not in sub.columns:
             return "—"
-        used = sub[col_name][sub[col_name] > 0]
-        if used.empty:
+        s = sub[col_name].fillna(0)
+        if (s > 0).sum() == 0:
             return "—"
-        return _fmt_val(used.mean(), 1, " mg")
+        return _fmt_val(s.mean(), 1, " mg")
 
     # ---- renderização HTML ----
     n_phases = len(phases)
@@ -351,14 +353,11 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
     tbody += '</tr>\n'
 
     # doses dos principais meds
+    # só fármacos de dose variável; média sobre todos os dias da fase (inclui zeros)
     DOSE_ROWS = [
-        ("venvanse_mg_total", "Lisdexanfetamina (média diária)"),
-        ("bupropiona_mg",     "Bupropiona (média diária)"),
-        ("zolpidem_mg_total", "Zolpidem (média diária)"),
-        ("fluvoxamina_mg",    "Fluvoxamina (média diária)"),
-        ("pregabalina_mg",    "Pregabalina (média diária)"),
-        ("tranilcipromina_mg","IMAO (média diária)"),
-        ("melatonina_mg",     "Melatonina (média diária)"),
+        ("venvanse_mg_total",     "Lisdexanfetamina (média/dia, todos os dias)"),
+        ("zolpidem_mg_total",     "Zolpidem (média/dia, todos os dias)"),
+        ("metilfenidato_mg_total","Metilfenidato (média/dia, todos os dias)"),
     ]
     for col_name, label in DOSE_ROWS:
         any_present = any(
