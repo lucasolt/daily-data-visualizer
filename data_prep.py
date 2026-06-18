@@ -202,6 +202,47 @@ def load_csv(source) -> pd.DataFrame:
     return pd.read_csv(source)
 
 
+EMOTION_COL = "emotion_keywords"
+
+
+def _split_emotions(cell) -> list[str]:
+    """Célula 'Irritabilidade, Depressão, Anedonia' -> lista normalizada (Title Case, sem vazios)."""
+    if not isinstance(cell, str) or not cell.strip():
+        return []
+    out = []
+    for tok in cell.split(","):
+        t = tok.strip()
+        if t:
+            out.append(t[:1].upper() + t[1:].lower() if t.isupper() or t.islower() else t)
+    return out
+
+
+def emotion_vocabulary(df: pd.DataFrame, top_n: int | None = None) -> list[str]:
+    """Emoções distintas ordenadas por frequência (nº de dias em que aparecem)."""
+    if EMOTION_COL not in df.columns:
+        return []
+    from collections import Counter
+    c = Counter()
+    for cell in df[EMOTION_COL]:
+        for e in set(_split_emotions(cell)):  # set: conta 1x por dia
+            c[e] += 1
+    ordered = [e for e, _ in c.most_common()]
+    return ordered[:top_n] if top_n else ordered
+
+
+def emotion_presence_frame(df: pd.DataFrame, emotions: list[str]) -> pd.DataFrame:
+    """DataFrame indexado por date, 1 coluna binária por emoção (1 = presente no dia)."""
+    rows = []
+    for cell in df[EMOTION_COL] if EMOTION_COL in df.columns else []:
+        present = set(_split_emotions(cell))
+        rows.append({e: (1 if e in present else 0) for e in emotions})
+    out = pd.DataFrame(rows, index=df["date"].values)
+    for e in emotions:
+        if e not in out.columns:
+            out[e] = 0
+    return out[emotions] if emotions else out
+
+
 def prepare(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
