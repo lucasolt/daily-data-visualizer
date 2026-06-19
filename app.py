@@ -6,10 +6,13 @@ Deploy:       ver README.md
 Requer: streamlit, pandas, numpy, plotly, scipy, statsmodels, requests
 """
 
+import json
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
+import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 from scipy import stats as sps
@@ -121,6 +124,110 @@ def add_phase_vlines(fig, change_points, subplot=False, annotate=True):
                 bgcolor="rgba(0,0,0,0.45)",
             )
     return fig
+
+
+# ---------------------------------------------------------------- prefs persistentes (Supabase)
+
+PREFS_TABLE = "dashboard_prefs"
+PREFS_ROW_ID = "default"
+
+
+def _supabase_headers():
+    key = st.secrets.get("supabase_key", "")
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _load_prefs_cached(_cache_buster: int = 0) -> dict:
+    """Lê o blob de prefs salvo. Qualquer falha (sem secrets, sem rede, linha
+    inexistente) degrada silenciosamente para {} — defaults hardcoded da UI valem.
+    """
+    base_url = st.secrets.get("supabase_url", "")
+    if not base_url or not st.secrets.get("supabase_key", ""):
+        return {}
+    try:
+        r = requests.get(
+            f"{base_url}/rest/v1/{PREFS_TABLE}",
+            params={"id": f"eq.{PREFS_ROW_ID}", "select": "prefs"},
+            headers=_supabase_headers(),
+            timeout=5,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if rows:
+            return rows[0].get("prefs") or {}
+    except Exception:
+        pass
+    return {}
+
+
+def save_prefs(prefs: dict) -> None:
+    """Upsert fire-and-forget do blob de prefs. Nunca propaga exceção —
+    falha de rede aqui não pode derrubar o dashboard.
+    """
+    base_url = st.secrets.get("supabase_url", "")
+    if not base_url or not st.secrets.get("supabase_key", ""):
+        return
+    try:
+        requests.post(
+            f"{base_url}/rest/v1/{PREFS_TABLE}",
+            params={"on_conflict": "id"},
+            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            data=json.dumps({"id": PREFS_ROW_ID, "prefs": prefs}),
+            timeout=5,
+        )
+    except Exception:
+        pass
+    # invalida o cache de leitura pra próxima sessão pegar o valor novo
+    _load_prefs_cached.clear()
+
+
+if "prefs_loaded" not in st.session_state:
+    st.session_state["saved_prefs"] = _load_prefs_cached()
+    st.session_state["prefs_loaded"] = True
+
+SAVED = st.session_state.get("saved_prefs", {})
+
+
+def saved_or(key, fallback):
+    """Valor salvo se existir e ainda for um tipo plausível, senão o fallback hardcoded."""
+    return SAVED[key] if key in SAVED and SAVED[key] is not None else fallback
+
+
+def filtered_default(saved_list, valid_options):
+    """Filtra uma lista salva contra as opções válidas atuais (colunas podem ter sumido)."""
+    if not isinstance(saved_list, list):
+        return None
+    out = [c for c in saved_list if c in valid_options]
+    return out or None
+
+
+def autosave_corr_prefs():
+    """Lê os widgets atuais da aba Correlações do session_state e salva.
+    Chamado via on_change dos próprios widgets -> autosave silencioso.
+    """
+    pred_cfg_out = {}
+    for c in st.session_state.get("reg_x", []):
+        lg = st.session_state.get(f"lag_{c}")
+        mm = st.session_state.get(f"mm_{c}")
+        if lg is not None and mm is not None:
+            pred_cfg_out[c] = [int(lg), int(mm)]
+    prefs = {
+        "reg_y": st.session_state.get("reg_y"),
+        "reg_x": st.session_state.get("reg_x"),
+        "pred_cfg": pred_cfg_out,
+        "target_mode": st.session_state.get("target_mode"),
+        "include_fase": st.session_state.get("include_fase"),
+        "ctrl_trend": st.session_state.get("ctrl_trend"),
+        "ctrl_weekend": st.session_state.get("ctrl_weekend"),
+        "ctrl_monday": st.session_state.get("ctrl_monday"),
+    }
+    save_prefs(prefs)
+    st.session_state["saved_prefs"] = prefs
 
 
 # ---------------------------------------------------------------- fonte de dados
@@ -551,49 +658,78 @@ with tab_corr:
     st.markdown("##### Regressão (OLS) com transformações")
     st.caption(
         "Modelo descritivo, não causal. Séries diárias são autocorrelacionadas — "
-        "use AR(1) ou Δ pra não inflar a significância. Leia os n por fase antes de interpretar."
+        "use AR(1) ou Δ pra não inflar a significância. Leia os n por fase antes de interpretar. "
+        "As escolhas abaixo são salvas automaticamente e voltam na próxima sessão."
     )
-    reg_y = st.selectbox("Desfecho (Y)", num_cols,
-                         index=num_cols.index("mood_score") if "mood_score" in num_cols else 0,
-                         key="reg_y")
 
+    _saved_reg_y = saved_or("reg_y", None)
+    _reg_y_default_idx = (
+        num_cols.index(_saved_reg_y) if _saved_reg_y in num_cols
+        else (num_cols.index("mood_score") if "mood_score" in num_cols else 0)
+    )
+    reg_y = st.selectbox(
+        "Desfecho (Y)", num_cols, index=_reg_y_default_idx,
+        key="reg_y", on_change=autosave_corr_prefs,
+    )
+
+    _mode_opts = ["Nível (cru)", "AR(1): incluir Y(t-1)", "Δ alvo (primeira diferença)"]
+    _saved_mode = saved_or("target_mode", "Nível (cru)")
+    _mode_idx = _mode_opts.index(_saved_mode) if _saved_mode in _mode_opts else 0
     # AR(1) e Δ-no-alvo são estratégias concorrentes p/ a mesma autocorrelação → exclusivas
     target_mode = st.radio(
         "Transformação do alvo / autocorrelação",
-        ["Nível (cru)", "AR(1): incluir Y(t-1)", "Δ alvo (primeira diferença)"],
-        horizontal=True,
+        _mode_opts, index=_mode_idx, horizontal=True,
+        key="target_mode", on_change=autosave_corr_prefs,
         help="Nível = Y bruto. AR(1) adiciona Y de ontem como preditor (controla a inércia). "
         "Δ modela a variação diária de Y. AR(1) e Δ são mutuamente exclusivos de propósito.",
     )
 
-    pred_default = [c for c in ["sleep_duration_h"] if c in num_cols and c != reg_y]
-    reg_x = st.multiselect("Preditores", [c for c in num_cols if c != reg_y],
-                           default=pred_default)
+    _candidate_x = [c for c in num_cols if c != reg_y]
+    _saved_reg_x = filtered_default(saved_or("reg_x", None), _candidate_x)
+    pred_default = _saved_reg_x if _saved_reg_x is not None else (
+        [c for c in ["sleep_duration_h"] if c in num_cols and c != reg_y]
+    )
+    reg_x = st.multiselect(
+        "Preditores", _candidate_x, default=pred_default,
+        key="reg_x", on_change=autosave_corr_prefs,
+    )
 
     # transformação por preditor (lag e/ou média móvel próprios)
+    _saved_pred_cfg = saved_or("pred_cfg", {}) or {}
     pred_cfg = {}
     if reg_x:
         st.caption("Transformação por preditor (lag = dias atrás; MM = média móvel de N dias até o dia):")
         for c in reg_x:
             cc1, cc2, cc3 = st.columns([3, 1, 1])
             cc1.markdown(f"&nbsp;**{med_label(c)}**", unsafe_allow_html=True)
-            lg = cc2.number_input("lag", 0, 14, 0, key=f"lag_{c}")
-            mm = cc3.number_input("MM", 1, 28, 1, key=f"mm_{c}",
-                                  help="1 = sem média móvel")
+            _saved_lg, _saved_mm = _saved_pred_cfg.get(c, [0, 1]) if isinstance(
+                _saved_pred_cfg.get(c), list) and len(_saved_pred_cfg.get(c, [])) == 2 else (0, 1)
+            lg = cc2.number_input("lag", 0, 14, int(_saved_lg), key=f"lag_{c}",
+                                  on_change=autosave_corr_prefs)
+            mm = cc3.number_input("MM", 1, 28, int(_saved_mm), key=f"mm_{c}",
+                                  help="1 = sem média móvel", on_change=autosave_corr_prefs)
             pred_cfg[c] = (int(lg), int(mm))
 
     cctrl1, cctrl2 = st.columns(2)
     include_fase = cctrl1.checkbox(
-        "Incluir fase  C(fase)", value=False, disabled=not has_fase,
+        "Incluir fase  C(fase)", value=bool(saved_or("include_fase", False)),
+        disabled=not has_fase, key="include_fase", on_change=autosave_corr_prefs,
         help="Deslocamentos de nível entre fases.",
     )
     ctrl_trend = cctrl1.checkbox(
-        "Tendência linear (trend)", value=False,
+        "Tendência linear (trend)", value=bool(saved_or("ctrl_trend", False)),
+        key="ctrl_trend", on_change=autosave_corr_prefs,
         help="Dia-índice como preditor. Sem isso, duas variáveis que só melhoram no tempo "
         "correlacionam espúrio.",
     )
-    ctrl_weekend = cctrl2.checkbox("Dummy fim de semana", value=False)
-    ctrl_monday = cctrl2.checkbox("Dummy segunda-feira", value=False)
+    ctrl_weekend = cctrl2.checkbox(
+        "Dummy fim de semana", value=bool(saved_or("ctrl_weekend", False)),
+        key="ctrl_weekend", on_change=autosave_corr_prefs,
+    )
+    ctrl_monday = cctrl2.checkbox(
+        "Dummy segunda-feira", value=bool(saved_or("ctrl_monday", False)),
+        key="ctrl_monday", on_change=autosave_corr_prefs,
+    )
 
     if st.button("Rodar regressão"):
         try:
@@ -828,7 +964,7 @@ with tab_fases:
         st.info("Nenhuma fase detectada nos dados do período selecionado.")
     else:
         report_html = build_phase_report(df)
-        st.iframe(report_html, height=1200)
+        st.components.v1.html(report_html, height=1200, scrolling=True)
         st.download_button(
             "⬇ Baixar relatório HTML",
             report_html.encode("utf-8"),
