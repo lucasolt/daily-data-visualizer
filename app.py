@@ -246,6 +246,7 @@ def autosave():
     Mantém prefs já salvas de outras abas que não estão montadas nesta execução
     (ex: salvar na sidebar não deve apagar o que foi salvo em Emoções).
     """
+    global SAVED
     prefs = dict(SAVED)  # parte do que já estava salvo, sobrescreve com o que está em tela
     for k in _AUTOSAVE_SIMPLE_KEYS:
         if k in st.session_state:
@@ -266,7 +267,6 @@ def autosave():
 
     save_prefs(prefs)
     st.session_state["saved_prefs"] = prefs
-    global SAVED
     SAVED = prefs
 
 
