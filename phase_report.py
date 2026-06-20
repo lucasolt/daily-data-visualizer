@@ -109,7 +109,9 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"title": title, "rows": rows}
 
     def time_row(label, col_name, direction, use_mean_aux=True):
-        """Para colunas de horário — mostra mediana + média auxiliar."""
+        """Para colunas de horário — mostra mediana (principal) + média auxiliar.
+        Única exceção à regra geral de média-como-principal: horários ficam em mediana
+        porque são mais robustos a outliers de virada-de-noite."""
         medians = [_safe_median(col(col_name, ph)) for ph in phases]
         means   = [_safe_mean(col(col_name, ph))   for ph in phases]
         vals    = [_fmt_h(m) for m in medians]
@@ -118,13 +120,13 @@ def build_phase_report(df: pd.DataFrame) -> str:
                 "nums": medians, "dir": direction, "type": "dual"}
 
     def dur_row(label, col_name, direction):
-        nums = [_safe_median(col(col_name, ph)) for ph in phases]
+        nums = [_safe_mean(col(col_name, ph)) for ph in phases]
         vals = [_fmt_h(n) for n in nums]
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": direction, "type": "single"}
 
-    def num_row(label, col_name, direction, decimals=1, suffix="", use_mean=False):
-        fn = _safe_mean if use_mean else _safe_median
+    def num_row(label, col_name, direction, decimals=1, suffix="", use_median=False):
+        fn = _safe_median if use_median else _safe_mean
         nums = [fn(col(col_name, ph)) for ph in phases]
         vals = [_fmt_val(n, decimals, suffix) for n in nums]
         return {"label": label, "vals": vals, "aux": None,
@@ -138,7 +140,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
             if col_name in sub.columns:
                 total = sub["sleep_duration_h"].replace(0, float("nan"))
                 pct = (sub[col_name] / total * 100)
-                rows_out.append(_safe_median(pct))
+                rows_out.append(_safe_mean(pct))
             else:
                 rows_out.append(float("nan"))
         vals = [_fmt_val(n, 1, "%") for n in rows_out]
@@ -164,13 +166,13 @@ def build_phase_report(df: pd.DataFrame) -> str:
                 "nums": nums, "dir": "lower", "type": "single"}
 
     def dual_num_row(label, col_name, direction, decimals=1, suffix=""):
-        """Mediana (principal) + μ média (auxiliar), mesmo padrão dos horários."""
-        medians = [_safe_median(col(col_name, ph)) for ph in phases]
+        """Média (principal) + md mediana (auxiliar)."""
         means   = [_safe_mean(col(col_name, ph))   for ph in phases]
-        vals = [_fmt_val(n, decimals, suffix) for n in medians]
-        aux  = [f"μ {_fmt_val(m, decimals, suffix)}" for m in means]
+        medians = [_safe_median(col(col_name, ph)) for ph in phases]
+        vals = [_fmt_val(n, decimals, suffix) for n in means]
+        aux  = [f"md {_fmt_val(m, decimals, suffix)}" for m in medians]
         return {"label": label, "vals": vals, "aux": aux,
-                "nums": medians, "dir": direction, "type": "dual"}
+                "nums": means, "dir": direction, "type": "dual"}
 
     # scores
     score_rows = []
@@ -190,7 +192,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
             time_row("Bed time",  "bed_time_h",  "lower"),
             time_row("Wake time", "wake_time_h", "lower"),
         ]),
-        build_section("Duração (mediana HH:MM)", [
+        build_section("Duração (média HH:MM)", [
             dur_row("Sleep duration",  "sleep_duration_h", "higher"),
             dur_row("In bed",          "inbed_duration_h", None),
             dur_row("Deep sleep",      "deep_sleep_h",     "higher"),
@@ -204,23 +206,23 @@ def build_phase_report(df: pd.DataFrame) -> str:
             pct_row("REM %",    "rem_sleep_h",   "higher"),
             pct_row("Deep %",   "deep_sleep_h",  "higher"),
         ]),
-        build_section("Perturbações (mediana)", [
+        build_section("Perturbações (média)", [
             dual_num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
             dual_num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
             dual_num_row("Interruption (min)",    "interruption_mins",   "lower"),
             dual_num_row("Full awakenings",       "full_awakenings",     "lower", 2),
         ]),
-        build_section("Cardíaco (mediana)", [
+        build_section("Cardíaco (média)", [
             dual_num_row("Avg BPM", "avg_bpm", "lower", 1),
             dual_num_row("VFC",     "VFC",     "higher", 1),
         ]),
-        build_section("Atividade (mediana)", [
+        build_section("Atividade (média)", [
             dual_num_row("Passos",          "steps",        "higher", 0),
             dual_num_row("Exercício (min)", "exercise_mins","higher", 0),
         ]),
     ]
     if score_rows:
-        sections.insert(0, build_section("Scores subjetivos (mediana)", score_rows))
+        sections.insert(0, build_section("Scores subjetivos (média)", score_rows))
 
     ctx_section = build_section("Contexto", [
         ctx_row("Dias fumados",  "fumou"),
@@ -396,7 +398,7 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
   <div class="legend">
     <span><span class="leg-box" style="background:rgba(29,158,117,.28)"></span>melhor valor relativo</span>
     <span><span class="leg-box" style="background:rgba(216,90,48,.28)"></span>pior valor relativo</span>
-    <span>· intensidade proporcional ao desvio da mediana global · horários: mediana (principal), μ média</span>
+    <span>· intensidade proporcional ao desvio do valor exibido entre fases · horários em mediana, demais métricas em média</span>
   </div>
   <div class="fn">* Sleep latency estimada — baixa confiabilidade · doses: média dos dias em uso (dose&gt;0)</div>
 </div>"""
