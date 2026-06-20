@@ -206,28 +206,68 @@ def filtered_default(saved_list, valid_options):
     return out or None
 
 
-def autosave_corr_prefs():
-    """Lê os widgets atuais da aba Correlações do session_state e salva.
+def clamp_period(saved_start, saved_end, dmin, dmax):
+    """saved_* podem ser strings ISO (vindas do JSON) ou None. Retorna (start, end) válidos
+    dentro de [dmin, dmax], ou (dmin, dmax) se algo estiver malformado ou totalmente fora do range."""
+    import datetime as _dt
+    try:
+        if isinstance(saved_start, str):
+            saved_start = _dt.date.fromisoformat(saved_start)
+        if isinstance(saved_end, str):
+            saved_end = _dt.date.fromisoformat(saved_end)
+        if saved_start is None or saved_end is None:
+            return dmin, dmax
+        if saved_end < dmin or saved_start > dmax:
+            return dmin, dmax
+        s = max(dmin, min(saved_start, dmax))
+        e = max(dmin, min(saved_end, dmax))
+        if s > e:
+            return dmin, dmax
+        return s, e
+    except Exception:
+        return dmin, dmax
+
+
+# keys simples (lidas direto do session_state, valor já serializável em JSON)
+_AUTOSAVE_SIMPLE_KEYS = [
+    "period_start", "period_end", "fases_sel", "roll", "show_phase_lines",
+    "scores_chosen",
+    "reg_y", "reg_x", "target_mode", "include_fase", "ctrl_trend", "ctrl_weekend", "ctrl_monday",
+    "corr_x_col", "corr_y_col", "corr_lag", "corr_color_by_phase",
+    "matrix_cols", "matrix_method",
+    "emo_chosen", "emo_roll",
+    "hist_var", "hist_use",
+]
+
+
+def autosave():
+    """Lê os widgets atuais (de qualquer aba) do session_state e salva o blob inteiro.
     Chamado via on_change dos próprios widgets -> autosave silencioso.
+    Mantém prefs já salvas de outras abas que não estão montadas nesta execução
+    (ex: salvar na sidebar não deve apagar o que foi salvo em Emoções).
     """
+    prefs = dict(SAVED)  # parte do que já estava salvo, sobrescreve com o que está em tela
+    for k in _AUTOSAVE_SIMPLE_KEYS:
+        if k in st.session_state:
+            v = st.session_state[k]
+            if isinstance(v, (list, tuple)) and v and hasattr(v[0], "isoformat"):
+                v = [d.isoformat() for d in v]
+            elif hasattr(v, "isoformat"):
+                v = v.isoformat()
+            prefs[k] = v
+
     pred_cfg_out = {}
     for c in st.session_state.get("reg_x", []):
         lg = st.session_state.get(f"lag_{c}")
         mm = st.session_state.get(f"mm_{c}")
         if lg is not None and mm is not None:
             pred_cfg_out[c] = [int(lg), int(mm)]
-    prefs = {
-        "reg_y": st.session_state.get("reg_y"),
-        "reg_x": st.session_state.get("reg_x"),
-        "pred_cfg": pred_cfg_out,
-        "target_mode": st.session_state.get("target_mode"),
-        "include_fase": st.session_state.get("include_fase"),
-        "ctrl_trend": st.session_state.get("ctrl_trend"),
-        "ctrl_weekend": st.session_state.get("ctrl_weekend"),
-        "ctrl_monday": st.session_state.get("ctrl_monday"),
-    }
+    prefs["pred_cfg"] = pred_cfg_out
+
     save_prefs(prefs)
     st.session_state["saved_prefs"] = prefs
+    global SAVED
+    SAVED = prefs
 
 
 # ---------------------------------------------------------------- fonte de dados
@@ -277,23 +317,37 @@ if dmin == dmax:
     period = (dmin, dmax)
     st.sidebar.caption(f"Único dia: {dmin:%d/%m/%y}")
 else:
+    _default_start, _default_end = clamp_period(
+        SAVED.get("period_start"), SAVED.get("period_end"), dmin, dmax
+    )
     period = st.sidebar.slider(
         "Período",
         min_value=dmin, max_value=dmax,
-        value=(dmin, dmax),
+        value=(_default_start, _default_end),
         format="DD/MM/YY",
         help="Arraste as pontas para recortar o intervalo de datas.",
+        key="_period_widget",
+        on_change=lambda: (
+            st.session_state.__setitem__("period_start", st.session_state["_period_widget"][0]),
+            st.session_state.__setitem__("period_end", st.session_state["_period_widget"][1]),
+            autosave(),
+        ),
     )
+    # garante que period_start/end estejam no session_state mesmo sem on_change ter disparado ainda
+    st.session_state.setdefault("period_start", period[0])
+    st.session_state.setdefault("period_end", period[1])
 df = df[(df["date"].dt.date >= period[0]) & (df["date"].dt.date <= period[1])]
 
 # ------------------------------------------------ filtro de fase
 has_fase = "fase_label" in df.columns and df["fase_label"].nunique() > 1
 if has_fase:
     fase_opts = dp.fase_order(df["fase_label"].unique())
+    _fases_default = filtered_default(SAVED.get("fases_sel"), fase_opts) or fase_opts
     fases_sel = st.sidebar.multiselect(
-        "Fase", fase_opts, default=fase_opts,
+        "Fase", fase_opts, default=_fases_default,
         help="Vazio = todas. Filtrar fases pode deixar o período não-contíguo — "
         "a média móvel atravessa os buracos e as linhas de troca refletem o que sobrou.",
+        key="fases_sel", on_change=autosave,
     )
     if fases_sel and len(fases_sel) < len(fase_opts):
         df = df[df["fase_label"].isin(fases_sel)]
@@ -302,10 +356,15 @@ if df.empty:
     st.warning("Nenhum dia atende aos filtros atuais.")
     st.stop()
 
-roll = st.sidebar.slider("Janela média móvel (dias)", 3, 28, 7)
+roll = st.sidebar.slider(
+    "Janela média móvel (dias)", 3, 28, int(saved_or("roll", 7)),
+    key="roll", on_change=autosave,
+)
 
 show_phase_lines = st.sidebar.checkbox(
-    "Marcar trocas de fase nos gráficos", value=has_fase, disabled=not has_fase,
+    "Marcar trocas de fase nos gráficos",
+    value=bool(saved_or("show_phase_lines", has_fase)), disabled=not has_fase,
+    key="show_phase_lines", on_change=autosave,
 )
 
 score_cols = [c for c in dp.SCORE_COLS if c in df.columns]
@@ -393,9 +452,11 @@ with tab_vis:
 
 # ------------------------------------------------ scores
 with tab_scores:
+    _scores_default = filtered_default(SAVED.get("scores_chosen"), score_cols) or score_cols
     chosen = st.multiselect(
-        "Séries", score_cols, default=score_cols,
+        "Séries", score_cols, default=_scores_default,
         format_func=lambda c: dp.SCORE_LABELS.get(c, c),
+        key="scores_chosen", on_change=autosave,
     )
     fig = go.Figure()
     for col_name in chosen:
@@ -552,12 +613,19 @@ with tab_corr:
     # ---- dispersão / fármaco ----
     st.markdown("##### Dispersão com lag")
     c1, c2, c3 = st.columns([2, 2, 1])
-    x_col = c1.selectbox("X (preditor)", num_cols,
-                         index=num_cols.index("sleep_duration_h") if "sleep_duration_h" in num_cols else 0)
-    y_col = c2.selectbox("Y (desfecho)", num_cols,
-                         index=num_cols.index("mood_score") if "mood_score" in num_cols else 0)
-    lag = c3.number_input("Lag (dias)", 0, 7, 0,
-                          help="X de k dias atrás vs Y de hoje. Ex.: sono de ontem → humor de hoje = lag 1.")
+    _saved_x_col = saved_or("corr_x_col", None)
+    _x_idx = (num_cols.index(_saved_x_col) if _saved_x_col in num_cols
+              else (num_cols.index("sleep_duration_h") if "sleep_duration_h" in num_cols else 0))
+    x_col = c1.selectbox("X (preditor)", num_cols, index=_x_idx,
+                         key="corr_x_col", on_change=autosave)
+    _saved_y_col = saved_or("corr_y_col", None)
+    _y_idx = (num_cols.index(_saved_y_col) if _saved_y_col in num_cols
+              else (num_cols.index("mood_score") if "mood_score" in num_cols else 0))
+    y_col = c2.selectbox("Y (desfecho)", num_cols, index=_y_idx,
+                         key="corr_y_col", on_change=autosave)
+    lag = c3.number_input("Lag (dias)", 0, 7, int(saved_or("corr_lag", 0)),
+                          help="X de k dias atrás vs Y de hoje. Ex.: sono de ontem → humor de hoje = lag 1.",
+                          key="corr_lag", on_change=autosave)
 
     x_is_med = x_col in med_set
     med_mode = None
@@ -618,7 +686,8 @@ with tab_corr:
             xs = np.linspace(pair["x"].min(), pair["x"].max(), 50)
 
             color_by_phase = has_fase and pair["fase"].nunique() > 1 and st.checkbox(
-                "Colorir pontos por fase", value=False)
+                "Colorir pontos por fase", value=bool(saved_or("corr_color_by_phase", False)),
+                key="corr_color_by_phase", on_change=autosave)
             fig = go.Figure()
             if color_by_phase:
                 cmap = [OK["blue"], OK["orange"], OK["green"], OK["vermillion"],
@@ -669,7 +738,7 @@ with tab_corr:
     )
     reg_y = st.selectbox(
         "Desfecho (Y)", num_cols, index=_reg_y_default_idx,
-        key="reg_y", on_change=autosave_corr_prefs,
+        key="reg_y", on_change=autosave,
     )
 
     _mode_opts = ["Nível (cru)", "AR(1): incluir Y(t-1)", "Δ alvo (primeira diferença)"]
@@ -679,7 +748,7 @@ with tab_corr:
     target_mode = st.radio(
         "Transformação do alvo / autocorrelação",
         _mode_opts, index=_mode_idx, horizontal=True,
-        key="target_mode", on_change=autosave_corr_prefs,
+        key="target_mode", on_change=autosave,
         help="Nível = Y bruto. AR(1) adiciona Y de ontem como preditor (controla a inércia). "
         "Δ modela a variação diária de Y. AR(1) e Δ são mutuamente exclusivos de propósito.",
     )
@@ -691,7 +760,7 @@ with tab_corr:
     )
     reg_x = st.multiselect(
         "Preditores", _candidate_x, default=pred_default,
-        key="reg_x", on_change=autosave_corr_prefs,
+        key="reg_x", on_change=autosave,
     )
 
     # transformação por preditor (lag e/ou média móvel próprios)
@@ -705,30 +774,30 @@ with tab_corr:
             _saved_lg, _saved_mm = _saved_pred_cfg.get(c, [0, 1]) if isinstance(
                 _saved_pred_cfg.get(c), list) and len(_saved_pred_cfg.get(c, [])) == 2 else (0, 1)
             lg = cc2.number_input("lag", 0, 14, int(_saved_lg), key=f"lag_{c}",
-                                  on_change=autosave_corr_prefs)
+                                  on_change=autosave)
             mm = cc3.number_input("MM", 1, 28, int(_saved_mm), key=f"mm_{c}",
-                                  help="1 = sem média móvel", on_change=autosave_corr_prefs)
+                                  help="1 = sem média móvel", on_change=autosave)
             pred_cfg[c] = (int(lg), int(mm))
 
     cctrl1, cctrl2 = st.columns(2)
     include_fase = cctrl1.checkbox(
         "Incluir fase  C(fase)", value=bool(saved_or("include_fase", False)),
-        disabled=not has_fase, key="include_fase", on_change=autosave_corr_prefs,
+        disabled=not has_fase, key="include_fase", on_change=autosave,
         help="Deslocamentos de nível entre fases.",
     )
     ctrl_trend = cctrl1.checkbox(
         "Tendência linear (trend)", value=bool(saved_or("ctrl_trend", False)),
-        key="ctrl_trend", on_change=autosave_corr_prefs,
+        key="ctrl_trend", on_change=autosave,
         help="Dia-índice como preditor. Sem isso, duas variáveis que só melhoram no tempo "
         "correlacionam espúrio.",
     )
     ctrl_weekend = cctrl2.checkbox(
         "Dummy fim de semana", value=bool(saved_or("ctrl_weekend", False)),
-        key="ctrl_weekend", on_change=autosave_corr_prefs,
+        key="ctrl_weekend", on_change=autosave,
     )
     ctrl_monday = cctrl2.checkbox(
         "Dummy segunda-feira", value=bool(saved_or("ctrl_monday", False)),
-        key="ctrl_monday", on_change=autosave_corr_prefs,
+        key="ctrl_monday", on_change=autosave,
     )
 
     if st.button("Rodar regressão"):
@@ -840,9 +909,15 @@ with tab_corr:
         score_cols + ["sleep_duration_h", "sleep_efficiency", "deep_sleep_h",
                       "rem_sleep_h", "steps", "avg_bpm", "VFC"]
     ) if c in num_cols]
-    matrix_cols = st.multiselect("Variáveis", num_cols, default=default_matrix)
+    _matrix_default = filtered_default(saved_or("matrix_cols", None), num_cols) or default_matrix
+    matrix_cols = st.multiselect("Variáveis", num_cols, default=_matrix_default,
+                                 key="matrix_cols", on_change=autosave)
     if len(matrix_cols) >= 2:
-        method = st.radio("Método", ["spearman", "pearson"], horizontal=True)
+        _method_opts = ["spearman", "pearson"]
+        _saved_method = saved_or("matrix_method", "spearman")
+        _method_idx = _method_opts.index(_saved_method) if _saved_method in _method_opts else 0
+        method = st.radio("Método", _method_opts, index=_method_idx, horizontal=True,
+                          key="matrix_method", on_change=autosave)
         corr = df[matrix_cols].corr(method=method)
         fig = go.Figure(go.Heatmap(
             z=corr.values, x=corr.columns, y=corr.columns,
@@ -868,13 +943,18 @@ with tab_dados:
     )
 
     with st.expander("Distribuição de uma variável"):
-        var = st.selectbox("Variável", num_cols,
-                           index=num_cols.index("mood_score") if "mood_score" in num_cols else 0,
-                           key="hist_var")
+        _saved_hist_var = saved_or("hist_var", None)
+        _hist_idx = (num_cols.index(_saved_hist_var) if _saved_hist_var in num_cols
+                     else (num_cols.index("mood_score") if "mood_score" in num_cols else 0))
+        var = st.selectbox("Variável", num_cols, index=_hist_idx,
+                           key="hist_var", on_change=autosave)
         s = df[var].astype(float)
         only_use = False
         if var in set(meds):
-            only_use = st.checkbox("Só dias em uso (dose > 0)", value=True, key="hist_use")
+            only_use = st.checkbox(
+                "Só dias em uso (dose > 0)", value=bool(saved_or("hist_use", True)),
+                key="hist_use", on_change=autosave,
+            )
             if only_use:
                 s = s[s > 0]
         s = s.dropna()
@@ -912,12 +992,17 @@ with tab_emo:
         )
         c1, c2 = st.columns([3, 1])
         default_top = vocab_all[:min(6, len(vocab_all))]
+        _emo_default = filtered_default(saved_or("emo_chosen", None), vocab_all) or default_top
         chosen_emo = c1.multiselect(
-            "Emoções", vocab_all, default=default_top,
+            "Emoções", vocab_all, default=_emo_default,
             format_func=lambda e: f"{e}",
             help="Ordenadas por frequência. Default: as mais frequentes.",
+            key="emo_chosen", on_change=autosave,
         )
-        emo_roll = c2.number_input("Janela MM (dias)", 3, 28, max(7, roll), key="emo_roll")
+        emo_roll = c2.number_input(
+            "Janela MM (dias)", 3, 28, int(saved_or("emo_roll", max(7, roll))),
+            key="emo_roll", on_change=autosave,
+        )
 
         if chosen_emo:
             pf = dp.emotion_presence_frame(df, chosen_emo)
