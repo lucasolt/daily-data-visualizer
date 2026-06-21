@@ -885,6 +885,8 @@ with tab_corr:
                 )
 
             reg = reg.dropna()
+
+            st.dataframe(desc_df, width="stretch", hide_index=True)
             # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
             desc_cols = [y_name] + built
             desc_rows = []
@@ -900,7 +902,6 @@ with tab_corr:
                     })
             desc_df = pd.DataFrame(desc_rows).round(3)
             st.markdown("###### Descritivas (n = linhas que entraram no fit)")
-            st.dataframe(desc_df, width="stretch", hide_index=True)
             k = len(built)
             if len(reg) < k + 2:
                 st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos. "
@@ -913,6 +914,27 @@ with tab_corr:
                     "t": res.tvalues, "p": res.pvalues,
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
+                                # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
+                # só pra preditores contínuos; dummies (fase_*, weekend, monday, const)
+                # não têm leitura natural de "1 DP de mudança" — ficam NaN de propósito.
+                def _is_dummy(s):
+                    u = set(pd.Series(s).dropna().unique().tolist())
+                    return u.issubset({0, 0.0, 1, 1.0})
+
+                dp_y = reg[y_name].std()
+                beta_std = []
+                for term in coefs.index:
+                    if term == "const" or term not in X.columns:
+                        beta_std.append(np.nan)
+                        continue
+                    col = X[term]
+                    #if _is_dummy(col):
+                    #    beta_std.append(np.nan)
+                    #    continue
+                    beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
+                coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
+
+                st.dataframe(coefs, width="stretch")
                 st.dataframe(coefs, width="stretch")
                 if len(built) >= 2:
                     vif_df = pd.DataFrame({
