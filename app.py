@@ -915,7 +915,21 @@ with tab_corr:
                     beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
                 coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
 
-                st.dataframe(coefs, width="stretch")
+                # reordena: coef, padronizado, p primeiro; IC no meio; EP/t por último
+                coefs = coefs[[
+                    "coef", "coef padronizado (β, DP)", "p",
+                    "IC 2.5%", "IC 97.5%", "EP", "t",
+                ]]
+
+                def _highlight_sig(row):
+                    sig = row["p"] < 0.05
+                    style = "font-weight: bold; background-color: rgba(0,200,150,0.18)" if sig else ""
+                    return [style] * len(row)
+
+                st.dataframe(
+                    coefs.style.apply(_highlight_sig, axis=1).format(precision=3),
+                    width="stretch",
+                )
 
                 # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
                 desc_cols = [y_name] + built
