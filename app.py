@@ -924,12 +924,10 @@ with tab_corr:
                 }).round(3)
 
                 # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
-                # só pra preditores contínuos; dummies (fase_*, weekend, monday, const)
-                # não têm leitura natural de "1 DP de mudança" — ficam NaN de propósito.
-                def _is_dummy(s):
-                    u = set(pd.Series(s).dropna().unique().tolist())
-                    return u.issubset({0, 0.0, 1, 1.0})
-
+                # aplicado a TODAS as variáveis, incluindo dummies (fase_*, weekend, monday).
+                # Nota: "1 DP de mudança" não tem leitura literal numa binária, mas o valor
+                # ainda serve pra comparar magnitude relativa entre termos de escalas diferentes
+                # — é a leitura que você está usando aqui, não a interpretação causal padrão.
                 dp_y = reg[y_name].std()
                 beta_std = []
                 for term in coefs.index:
@@ -937,9 +935,6 @@ with tab_corr:
                         beta_std.append(np.nan)
                         continue
                     col = X[term]
-                    if _is_dummy(col):
-                        beta_std.append(np.nan)
-                        continue
                     beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
                 coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
 
