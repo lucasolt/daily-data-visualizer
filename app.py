@@ -17,6 +17,13 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from scipy import stats as sps
 
+try:
+    import statsmodels.api as sm
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+except ImportError:
+    st.error("statsmodels não instalado. Adicione `statsmodels` ao requirements.txt.")
+    st.stop()
+
 import data_prep as dp
 
 from phase_report import build_phase_report
@@ -891,6 +898,23 @@ with tab_corr:
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
                 st.dataframe(coefs, width="stretch")
+                if len(built) >= 2:
+                    vif_df = pd.DataFrame({
+                        "preditor": X.columns,
+                        "VIF": [variance_inflation_factor(X.values.astype(float), i)
+                                for i in range(X.shape[1])],
+                    })
+                    vif_df = vif_df[vif_df["preditor"] != "const"].round(2)
+                    st.markdown("###### VIF (Variance Inflation Factor)")
+                    st.dataframe(vif_df, width="stretch", hide_index=True)
+                    st.caption(
+                        "VIF > 5–10 sugere multicolinearidade preocupante para esse termo. "
+                        "Dummies de uma mesma categórica (ex.: fase) são correlacionadas entre si "
+                        "por construção e tendem a VIF elevado mesmo sem problema real — "
+                        "interprete junto com o número de condição acima, não isoladamente."
+                    )
+
+                terms_txt = " + ".join(built) if built else "const"
                 terms_txt = " + ".join(built) if built else "const"
                 st.caption(
                     f"`{y_name} ~ {terms_txt}` · n = {int(res.nobs)} · R² = {res.rsquared:.3f} · "
