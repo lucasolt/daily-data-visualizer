@@ -808,12 +808,6 @@ with tab_corr:
     )
 
     if st.button("Rodar regressão"):
-        try:
-            import statsmodels.api as sm
-        except ImportError:
-            st.error("statsmodels não instalado. Adicione `statsmodels` ao requirements.txt.")
-            st.stop()
-
         if not reg_x and not include_fase and target_mode == "Nível (cru)" and not (
             ctrl_trend or ctrl_weekend or ctrl_monday):
             st.warning("Escolha ao menos um preditor ou uma transformação.")
@@ -867,9 +861,12 @@ with tab_corr:
             # ---- fase como dummies ----
             fase_cols = []
             if include_fase:
-                fase_order_list = dp.fase_order(d["fase_label"].unique())  # ordenação numérica: 1, 2, ..., 6.5
-                d["fase_label"] = pd.Categorical(d["fase_label"], categories=fase_order_list, ordered=True)
-                dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                # fixa a ordem numérica das fases (1, 2, ..., 6.5) em vez da ordem
+                # alfabética padrão do pandas, e usa a primeira como baseline (drop_first)
+                fase_order_list = dp.fase_order(d["fase_label"].unique())
+                d["fase_label"] = pd.Categorical(
+                    d["fase_label"], categories=fase_order_list, ordered=True
+                )
                 dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
                 for col in dummies.columns:
                     reg[col] = dummies[col].values
@@ -885,23 +882,6 @@ with tab_corr:
                 )
 
             reg = reg.dropna()
-
-            st.dataframe(desc_df, width="stretch", hide_index=True)
-            # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
-            desc_cols = [y_name] + built
-            desc_rows = []
-            for c in desc_cols:
-                    s = reg[c].astype(float)
-                    desc_rows.append({
-                        "variável": c,
-                        "média": s.mean(),
-                        "DP": s.std(),
-                        "mín": s.min(),
-                        "máx": s.max(),
-                        "amplitude": s.max() - s.min(),
-                    })
-            desc_df = pd.DataFrame(desc_rows).round(3)
-            st.markdown("###### Descritivas (n = linhas que entraram no fit)")
             k = len(built)
             if len(reg) < k + 2:
                 st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos. "
@@ -914,7 +894,8 @@ with tab_corr:
                     "t": res.tvalues, "p": res.pvalues,
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
-                                # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
+
+                # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
                 # só pra preditores contínuos; dummies (fase_*, weekend, monday, const)
                 # não têm leitura natural de "1 DP de mudança" — ficam NaN de propósito.
                 def _is_dummy(s):
@@ -930,12 +911,30 @@ with tab_corr:
                     col = X[term]
                     #if _is_dummy(col):
                     #    beta_std.append(np.nan)
-                    #    continue
+                    #   continue
                     beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
                 coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
 
-                
                 st.dataframe(coefs, width="stretch")
+
+                # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
+                desc_cols = [y_name] + built
+                desc_rows = []
+                for c in desc_cols:
+                    s = reg[c].astype(float)
+                    desc_rows.append({
+                        "variável": c,
+                        "média": s.mean(),
+                        "DP": s.std(),
+                        "mín": s.min(),
+                        "máx": s.max(),
+                        "amplitude": s.max() - s.min(),
+                    })
+                desc_df = pd.DataFrame(desc_rows).round(3)
+                st.markdown("###### Descritivas (n = linhas que entraram no fit)")
+                st.dataframe(desc_df, width="stretch", hide_index=True)
+
+                # ---- VIF (multicolinearidade por preditor) ----
                 if len(built) >= 2:
                     vif_df = pd.DataFrame({
                         "preditor": X.columns,
@@ -952,7 +951,6 @@ with tab_corr:
                         "interprete junto com o número de condição acima, não isoladamente."
                     )
 
-                terms_txt = " + ".join(built) if built else "const"
                 terms_txt = " + ".join(built) if built else "const"
                 st.caption(
                     f"`{y_name} ~ {terms_txt}` · n = {int(res.nobs)} · R² = {res.rsquared:.3f} · "
