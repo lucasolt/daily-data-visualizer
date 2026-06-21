@@ -885,6 +885,22 @@ with tab_corr:
                 )
 
             reg = reg.dropna()
+            # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
+            desc_cols = [y_name] + built
+            desc_rows = []
+            for c in desc_cols:
+                    s = reg[c].astype(float)
+                    desc_rows.append({
+                        "variável": c,
+                        "média": s.mean(),
+                        "DP": s.std(),
+                        "mín": s.min(),
+                        "máx": s.max(),
+                        "amplitude": s.max() - s.min(),
+                    })
+            desc_df = pd.DataFrame(desc_rows).round(3)
+            st.markdown("###### Descritivas (n = linhas que entraram no fit)")
+            st.dataframe(desc_df, width="stretch", hide_index=True)
             k = len(built)
             if len(reg) < k + 2:
                 st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos. "
