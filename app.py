@@ -860,6 +860,9 @@ with tab_corr:
             # ---- fase como dummies ----
             fase_cols = []
             if include_fase:
+                fase_order_list = dp.fase_order(d["fase_label"].unique())  # ordenação numérica: 1, 2, ..., 6.5
+                d["fase_label"] = pd.Categorical(d["fase_label"], categories=fase_order_list, ordered=True)
+                dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
                 dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
                 for col in dummies.columns:
                     reg[col] = dummies[col].values
