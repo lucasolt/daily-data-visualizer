@@ -923,11 +923,39 @@ with tab_corr:
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
 
+                # ---- coeficiente implícito da fase de referência (só em sum-to-zero) ----
+                # em "vs. média geral", a última fase da ordem numérica vira a referência
+                # implícita e não ganha coluna própria — mas seu coeficiente existe e é
+                # recuperável por combinação linear: coef = -soma(demais fase_*), com
+                # EP/t/p derivados via res.cov_params(). Validado contra reparametrização
+                # direta (trocar qual fase fica de fora) — bate exatamente.
+                if include_fase and fase_coding == "vs. média geral" and fase_cols:
+                    ref_fase = fase_order_list[-1]
+                    L = pd.Series(0.0, index=res.params.index)
+                    L[fase_cols] = -1.0
+                    coef_ref = float(L @ res.params)
+                    var_ref = float(L.values @ res.cov_params().values @ L.values)
+                    se_ref = float(np.sqrt(var_ref)) if var_ref > 0 else float("nan")
+                    t_ref = coef_ref / se_ref if se_ref else float("nan")
+                    from scipy import stats as _sps
+                    df_resid = res.df_resid
+                    p_ref = 2 * (1 - _sps.t.cdf(abs(t_ref), df_resid)) if se_ref else float("nan")
+                    ci_lo = coef_ref - _sps.t.ppf(0.975, df_resid) * se_ref if se_ref else float("nan")
+                    ci_hi = coef_ref + _sps.t.ppf(0.975, df_resid) * se_ref if se_ref else float("nan")
+                    coefs.loc[f"fase_{ref_fase} (ref., implícito)"] = {
+                        "coef": round(coef_ref, 3), "EP": round(se_ref, 3),
+                        "t": round(t_ref, 3), "p": round(p_ref, 3),
+                        "IC 2.5%": round(ci_lo, 3), "IC 97.5%": round(ci_hi, 3),
+                    }
+
                 # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
-                # aplicado a TODAS as variáveis, incluindo dummies (fase_*, weekend, monday).
-                # Nota: "1 DP de mudança" não tem leitura literal numa binária, mas o valor
-                # ainda serve pra comparar magnitude relativa entre termos de escalas diferentes
-                # — é a leitura que você está usando aqui, não a interpretação causal padrão.
+                # aplicado a TODAS as variáveis com coluna própria em X, incluindo dummies
+                # (fase_*, weekend, monday). A fase de referência implícita (sum-to-zero)
+                # fica de fora: seu coeficiente é bem definido (combinação linear, validado),
+                # mas o "DP do preditor" não tem uma definição única pra ela — ela é
+                # definida pela ausência nas outras colunas, não por uma coluna própria.
+                # Padronizar exigiria escolher uma convenção arbitrária; deixo NaN em vez
+                # de reportar um número que pareceria preciso sem ser.
                 dp_y = reg[y_name].std()
                 beta_std = []
                 for term in coefs.index:
