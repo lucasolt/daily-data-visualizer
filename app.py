@@ -239,7 +239,7 @@ def clamp_period(saved_start, saved_end, dmin, dmax):
 _AUTOSAVE_SIMPLE_KEYS = [
     "period_start", "period_end", "fases_sel", "roll", "show_phase_lines",
     "scores_chosen",
-    "reg_y", "reg_x", "target_mode", "include_fase", "ctrl_trend", "ctrl_weekend", "ctrl_monday",
+    "reg_y", "reg_x", "target_mode", "include_fase", "fase_coding", "ctrl_trend", "ctrl_weekend", "ctrl_monday",
     "corr_x_col", "corr_y_col", "corr_lag", "corr_color_by_phase",
     "matrix_cols", "matrix_method",
     "emo_chosen", "emo_roll",
@@ -410,6 +410,21 @@ def line_with_roll(fig, x, y, name, color, window, row=None, col=None):
 
 def med_label(m: str) -> str:
     return m.replace("_mg_total", "").replace("_mg", "").replace("_", " ")
+
+
+def sum_to_zero_dummies(s: pd.Categorical, categories: list, prefix: str = "fase") -> pd.DataFrame:
+    """Codificação soma-zero: referência implícita = última categoria, recebe -1
+    em vez de 0 nas demais colunas. Intercepto vira a média geral (não a média
+    de uma categoria específica) — cada coeficiente é o desvio dessa fase em
+    relação à média de todas as fases, diretamente comparável entre si."""
+    out = pd.DataFrame(index=s.index)
+    ref = categories[-1]
+    for cat in categories[:-1]:
+        col = pd.Series(0.0, index=s.index)
+        col[s == cat] = 1.0
+        col[s == ref] = -1.0
+        out[f"{prefix}_{cat}"] = col
+    return out
 
 
 # ---------------------------------------------------------------- tabs
@@ -792,6 +807,16 @@ with tab_corr:
         disabled=not has_fase, key="include_fase", on_change=autosave,
         help="Deslocamentos de nível entre fases.",
     )
+    fase_coding = cctrl1.radio(
+        "Referência da fase", ["vs. fase_1", "vs. média geral"],
+        index=(0 if saved_or("fase_coding", "vs. fase_1") == "vs. fase_1" else 1),
+        disabled=not (has_fase and include_fase),
+        key="fase_coding", on_change=autosave,
+        help="vs. fase_1: cada coeficiente é o delta em relação à fase_1 (regime "
+        "farmacológico de base, mas não necessariamente um período humoral neutro). "
+        "vs. média geral: cada coeficiente é o desvio em relação à média de todas as "
+        "fases — mais comparável entre fases, sem depender de qual foi escolhida como referência.",
+    )
     ctrl_trend = cctrl1.checkbox(
         "Tendência linear (trend)", value=bool(saved_or("ctrl_trend", False)),
         key="ctrl_trend", on_change=autosave,
@@ -862,12 +887,15 @@ with tab_corr:
             fase_cols = []
             if include_fase:
                 # fixa a ordem numérica das fases (1, 2, ..., 6.5) em vez da ordem
-                # alfabética padrão do pandas, e usa a primeira como baseline (drop_first)
+                # alfabética padrão do pandas
                 fase_order_list = dp.fase_order(d["fase_label"].unique())
                 d["fase_label"] = pd.Categorical(
                     d["fase_label"], categories=fase_order_list, ordered=True
                 )
-                dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                if fase_coding == "vs. fase_1":
+                    dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                else:
+                    dummies = sum_to_zero_dummies(d["fase_label"], fase_order_list)
                 for col in dummies.columns:
                     reg[col] = dummies[col].values
                 fase_cols = list(dummies.columns)
@@ -909,9 +937,9 @@ with tab_corr:
                         beta_std.append(np.nan)
                         continue
                     col = X[term]
-                    #if _is_dummy(col):
-                    #    beta_std.append(np.nan)
-                    #   continue
+                    if _is_dummy(col):
+                        beta_std.append(np.nan)
+                        continue
                     beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
                 coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
 
