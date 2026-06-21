@@ -934,7 +934,7 @@ with tab_corr:
                     beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
                 coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
 
-                st.dataframe(coefs, width="stretch")
+                
                 st.dataframe(coefs, width="stretch")
                 if len(built) >= 2:
                     vif_df = pd.DataFrame({
