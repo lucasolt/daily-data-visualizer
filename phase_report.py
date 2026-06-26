@@ -214,6 +214,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "cognition_score": ("Cognição", "higher"),
         "attention_score": ("Atenção", "higher"),
         "fluencia_verbal_espontaneidade_social": ("Fluência verbal", "higher"),
+        "drive_score": ("Iniciativa/Drive", "higher"),
     }
     for col_name, (label, direction) in score_map.items():
         if col_name in df.columns:
