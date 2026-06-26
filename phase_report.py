@@ -225,8 +225,8 @@ def build_phase_report(df: pd.DataFrame) -> str:
 
     sections = [
         build_section("Horários — mediana (principal) · μ média", [
-            time_row("Bed time",  "bed_time_h",  "lower", "median", "mean"),
-            time_row("Wake time", "wake_time_h", "lower", "median", "mean"),
+            time_row("Bed time",  "bed_time_h",  "lower"),
+            time_row("Wake time", "wake_time_h", "lower"),
         ]),
         build_section("Duração (média HH:MM)", [
             dur_row("Sleep duration",  "sleep_duration_h", "higher"),
