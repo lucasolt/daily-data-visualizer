@@ -224,11 +224,11 @@ def build_phase_report(df: pd.DataFrame) -> str:
             )
 
     sections = [
-        build_section("Horários — mediana (principal) · μ média", [
+        build_section("Horários  (mediana principal · μ média)", [
             time_row("Bed time",  "bed_time_h",  "lower"),
             time_row("Wake time", "wake_time_h", "lower"),
         ]),
-        build_section("Duração (média HH:MM)", [
+        build_section("Duração (média principal · md mediana)", [
             dur_row("Sleep duration",  "sleep_duration_h", "higher"),
             dur_row("In bed",          "inbed_duration_h", None),
             dur_row("Deep sleep",      "deep_sleep_h",     "higher"),
@@ -242,17 +242,17 @@ def build_phase_report(df: pd.DataFrame) -> str:
             pct_row("REM %",    "rem_sleep_h",   "higher"),
             pct_row("Deep %",   "deep_sleep_h",  "higher"),
         ]),
-        build_section("Perturbações (média)", [
+        build_section("Perturbações (média principal · md mediana)", [
             dual_num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
             dual_num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
             dual_num_row("Interruption (min)",    "interruption_mins",   "lower"),
             dual_num_row("Full awakenings",       "full_awakenings",     "lower", 2),
         ]),
-        build_section("Cardíaco (média)", [
+        build_section("Cardíaco (média principal · md mediana)", [
             dual_num_row("Avg BPM", "avg_bpm", "lower", 1),
             dual_num_row("VFC",     "VFC",     "higher", 1),
         ]),
-        build_section("Atividade (média)", [
+        build_section("Atividade (média principal · md mediana)", [
             dual_num_row("Passos",          "steps",        "higher", 0),
             dual_num_row("Exercício (min)", "exercise_mins","higher", 0),
         ]),
