@@ -17,6 +17,7 @@ SCORE_COLS = [
     "cognition_score",
     "attention_score",
     "mood_score",
+    "drive_score",
     "fluencia_verbal_espontaneidade_social",
 ]
 
@@ -25,6 +26,7 @@ SCORE_LABELS = {
     "cognition_score": "Cognição",
     "attention_score": "Atenção",
     "mood_score": "Humor",
+    "drive_score": "Iniciativa/Drive",
     "fluencia_verbal_espontaneidade_social": "Fluência/espontaneidade",
 }
 
@@ -87,42 +89,6 @@ ACTIVITY_LABELS = {
     "avg_bpm": "BPM médio",
     "VFC": "VFC",
 }
-
-# ---------------------------------------------------------------- helpers booleanos
-
-_BOOL_VOCAB = {
-    "true": 1, "false": 0,
-    "verdadeiro": 1, "falso": 0,
-    "sim": 1, "não": 0, "nao": 0,
-    "yes": 1, "no": 0,
-}
-
-
-def _autodetect_bool_cols(df: pd.DataFrame, exclude: set[str] = frozenset()) -> list[str]:
-    """Colunas de texto cujos valores não-vazios batem inteiramente no vocabulário
-    true/false/sim/não. Conservador por design: se um único valor não bater
-    (texto livre, número, etc.), a coluna NÃO é convertida."""
-    out = []
-    for col in df.columns:
-        if col in exclude:
-            continue
-        s = df[col]
-        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
-            continue
-        vals = s.dropna().astype(str).str.strip().str.lower()
-        vals = vals[vals != ""]
-        if len(vals) == 0:
-            continue
-        if vals.isin(_BOOL_VOCAB.keys()).all():
-            out.append(col)
-    return out
-
-
-def _convert_bool_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    df = df.copy()
-    for col in cols:
-        df[col] = df[col].astype(str).str.strip().str.lower().map(_BOOL_VOCAB)
-    return df
 
 
 # ---------------------------------------------------------------- helpers numéricos
@@ -294,11 +260,6 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     for col in MED_COLS:
         if col in df.columns:
             df[col] = df[col].fillna(0.0)
-            
-    bool_cols = _autodetect_bool_cols(df, exclude={"date"})
-    if bool_cols:
-        df = _convert_bool_cols(df, bool_cols)
-
 
     for col in DURATION_COLS:
         if col in df.columns:
