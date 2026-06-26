@@ -109,9 +109,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"title": title, "rows": rows}
 
     def time_row(label, col_name, direction, use_mean_aux=True):
-        """Para colunas de horário — mostra mediana (principal) + média auxiliar.
-        Única exceção à regra geral de média-como-principal: horários ficam em mediana
-        porque são mais robustos a outliers de virada-de-noite."""
+        """Para colunas de horário — mostra mediana + média auxiliar."""
         medians = [_safe_median(col(col_name, ph)) for ph in phases]
         means   = [_safe_mean(col(col_name, ph))   for ph in phases]
         vals    = [_fmt_h(m) for m in medians]
@@ -120,13 +118,13 @@ def build_phase_report(df: pd.DataFrame) -> str:
                 "nums": medians, "dir": direction, "type": "dual"}
 
     def dur_row(label, col_name, direction):
-        nums = [_safe_mean(col(col_name, ph)) for ph in phases]
+        nums = [_safe_median(col(col_name, ph)) for ph in phases]
         vals = [_fmt_h(n) for n in nums]
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": direction, "type": "single"}
 
-    def num_row(label, col_name, direction, decimals=1, suffix="", use_median=False):
-        fn = _safe_median if use_median else _safe_mean
+    def num_row(label, col_name, direction, decimals=1, suffix="", use_mean=False):
+        fn = _safe_mean if use_mean else _safe_median
         nums = [fn(col(col_name, ph)) for ph in phases]
         vals = [_fmt_val(n, decimals, suffix) for n in nums]
         return {"label": label, "vals": vals, "aux": None,
@@ -140,7 +138,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
             if col_name in sub.columns:
                 total = sub["sleep_duration_h"].replace(0, float("nan"))
                 pct = (sub[col_name] / total * 100)
-                rows_out.append(_safe_mean(pct))
+                rows_out.append(_safe_median(pct))
             else:
                 rows_out.append(float("nan"))
         vals = [_fmt_val(n, 1, "%") for n in rows_out]
@@ -165,47 +163,71 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": "lower", "type": "single"}
 
-    def dual_num_row(label, col_name, direction, decimals=1, suffix="", min_cov=None):
-        """Mediana (principal) + μ média (auxiliar), mesmo padrão dos horários.
-        min_cov: se definido, suprime (→ NaN) a célula de uma fase cuja cobertura
-        (dias com valor não-nulo / dias da fase) for < min_cov. Célula suprimida
-        não exibe valor nem μ e não entra no cálculo de cor (_bg_color)."""
-        medians = [_safe_median(col(col_name, ph)) for ph in phases]
-        means   = [_safe_mean(col(col_name, ph))   for ph in phases]
+    def dual_num_row(label, col_name, direction, decimals=1, suffix="",
+                     primary="median", aux="mean", min_cov=None):
+        """Linha de duas estatísticas: uma principal (grande) + uma auxiliar (pequena).
+
+        primary : "median" ou "mean" — qual estatística vira o valor principal.
+        aux     : "mean", "median" ou None — qual vai na linha auxiliar (None = sem auxiliar).
+                  Prefixo segue a escolha: 'μ' para média, 'md' para mediana.
+        min_cov : se definido (ex. 0.20), suprime (→ NaN) a célula de uma fase cuja
+                  cobertura — dias com valor não-nulo / dias da fase — for < min_cov.
+                  Célula suprimida não mostra valor nem auxiliar e não entra no
+                  cálculo de cor (_bg_color), como se aquela fase não existisse pra
+                  esta linha.
+
+        DEFAULT (primary="median", aux="mean") reproduz o comportamento histórico:
+        mediana como principal, μ média como auxiliar. Os scores subjetivos
+        sobrescrevem para primary="mean" (ver seção de scores abaixo).
+        """
+        stat = {"mean": _safe_mean, "median": _safe_median}
+        prim_vals = [stat[primary](col(col_name, ph)) for ph in phases]
+        aux_vals  = [stat[aux](col(col_name, ph)) for ph in phases] if aux else None
+
         if min_cov is not None:
             for i, ph in enumerate(phases):
                 sub = phase_data[ph]
                 n = len(sub)
-                s = col(col_name, ph)
-                cov = (s.notna().sum() / n) if n else 0.0
+                cov = (col(col_name, ph).notna().sum() / n) if n else 0.0
                 if cov < min_cov:
-                    medians[i] = float("nan")
-                    means[i]   = float("nan")
-        vals = [_fmt_val(n, decimals, suffix) for n in medians]
-        aux  = [f"μ {_fmt_val(m, decimals, suffix)}" for m in means]
-        return {"label": label, "vals": vals, "aux": aux,
-                "nums": medians, "dir": direction, "type": "dual"}
+                    prim_vals[i] = float("nan")
+                    if aux_vals is not None:
+                        aux_vals[i] = float("nan")
 
-    # scores
+        vals = [_fmt_val(v, decimals, suffix) for v in prim_vals]
+        aux_out = None
+        if aux:
+            pre = "μ" if aux == "mean" else "md"
+            aux_out = [f"{pre} {_fmt_val(a, decimals, suffix)}" for a in aux_vals]
+        return {"label": label, "vals": vals, "aux": aux_out,
+                "nums": prim_vals, "dir": direction, "type": "dual"}
+
+    # scores subjetivos: principal = MÉDIA, auxiliar = md mediana.
+    # (decisão explícita — diferente das demais métricas, que usam mediana como principal.)
+    # min_cov=0.20: fase com menos de 20% dos dias preenchidos não exibe score
+    # (nem entra no cálculo de cor das outras fases).
+    SCORE_MIN_COV = 0.20
     score_rows = []
     score_map = {
         "mood_score": ("Humor", "higher"),
         "energy_score": ("Energia", "higher"),
         "cognition_score": ("Cognição", "higher"),
         "attention_score": ("Atenção", "higher"),
-        "drive_score": ("Iniciativa/Drive", "higher"),
         "fluencia_verbal_espontaneidade_social": ("Fluência verbal", "higher"),
     }
     for col_name, (label, direction) in score_map.items():
         if col_name in df.columns:
-            score_rows.append(dual_num_row(label, col_name, direction, min_cov=0.20))
+            score_rows.append(
+                dual_num_row(label, col_name, direction,
+                             primary="mean", aux="median", min_cov=SCORE_MIN_COV)
+            )
 
     sections = [
         build_section("Horários — mediana (principal) · μ média", [
             time_row("Bed time",  "bed_time_h",  "lower"),
             time_row("Wake time", "wake_time_h", "lower"),
         ]),
-        build_section("Duração (média HH:MM)", [
+        build_section("Duração (mediana HH:MM)", [
             dur_row("Sleep duration",  "sleep_duration_h", "higher"),
             dur_row("In bed",          "inbed_duration_h", None),
             dur_row("Deep sleep",      "deep_sleep_h",     "higher"),
@@ -219,23 +241,24 @@ def build_phase_report(df: pd.DataFrame) -> str:
             pct_row("REM %",    "rem_sleep_h",   "higher"),
             pct_row("Deep %",   "deep_sleep_h",  "higher"),
         ]),
-        build_section("Perturbações (média)", [
+        build_section("Perturbações (mediana)", [
             dual_num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
             dual_num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
             dual_num_row("Interruption (min)",    "interruption_mins",   "lower"),
             dual_num_row("Full awakenings",       "full_awakenings",     "lower", 2),
         ]),
-        build_section("Cardíaco (média)", [
+        build_section("Cardíaco (mediana)", [
             dual_num_row("Avg BPM", "avg_bpm", "lower", 1),
             dual_num_row("VFC",     "VFC",     "higher", 1),
         ]),
-        build_section("Atividade (média)", [
+        build_section("Atividade (mediana)", [
             dual_num_row("Passos",          "steps",        "higher", 0),
             dual_num_row("Exercício (min)", "exercise_mins","higher", 0),
         ]),
     ]
     if score_rows:
-        sections.insert(0, build_section("Scores subjetivos (média)", score_rows))
+        sections.insert(0, build_section(
+            "Scores subjetivos (média principal · md mediana)", score_rows))
 
     ctx_section = build_section("Contexto", [
         ctx_row("Dias fumados",  "fumou"),
@@ -411,9 +434,9 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
   <div class="legend">
     <span><span class="leg-box" style="background:rgba(29,158,117,.28)"></span>melhor valor relativo</span>
     <span><span class="leg-box" style="background:rgba(216,90,48,.28)"></span>pior valor relativo</span>
-    <span>· intensidade proporcional ao desvio do valor exibido entre fases · horários em mediana, demais métricas em média</span>
+    <span>· intensidade proporcional ao desvio da mediana global · horários: mediana (principal), μ média · scores subjetivos: média (principal), md mediana</span>
   </div>
-  <div class="fn">* Sleep latency estimada — baixa confiabilidade · doses: média dos dias em uso (dose&gt;0)</div>
+  <div class="fn">* Sleep latency estimada — baixa confiabilidade · doses: média dos dias em uso (dose&gt;0) · scores com &lt; 20% dos dias preenchidos na fase são omitidos</div>
 </div>"""
 
     return html
