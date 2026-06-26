@@ -165,14 +165,26 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": "lower", "type": "single"}
 
-    def dual_num_row(label, col_name, direction, decimals=1, suffix=""):
-        """Média (principal) + md mediana (auxiliar)."""
-        means   = [_safe_mean(col(col_name, ph))   for ph in phases]
+    def dual_num_row(label, col_name, direction, decimals=1, suffix="", min_cov=None):
+        """Mediana (principal) + μ média (auxiliar), mesmo padrão dos horários.
+        min_cov: se definido, suprime (→ NaN) a célula de uma fase cuja cobertura
+        (dias com valor não-nulo / dias da fase) for < min_cov. Célula suprimida
+        não exibe valor nem μ e não entra no cálculo de cor (_bg_color)."""
         medians = [_safe_median(col(col_name, ph)) for ph in phases]
-        vals = [_fmt_val(n, decimals, suffix) for n in means]
-        aux  = [f"md {_fmt_val(m, decimals, suffix)}" for m in medians]
+        means   = [_safe_mean(col(col_name, ph))   for ph in phases]
+        if min_cov is not None:
+            for i, ph in enumerate(phases):
+                sub = phase_data[ph]
+                n = len(sub)
+                s = col(col_name, ph)
+                cov = (s.notna().sum() / n) if n else 0.0
+                if cov < min_cov:
+                    medians[i] = float("nan")
+                    means[i]   = float("nan")
+        vals = [_fmt_val(n, decimals, suffix) for n in medians]
+        aux  = [f"μ {_fmt_val(m, decimals, suffix)}" for m in means]
         return {"label": label, "vals": vals, "aux": aux,
-                "nums": means, "dir": direction, "type": "dual"}
+                "nums": medians, "dir": direction, "type": "dual"}
 
     # scores
     score_rows = []
@@ -186,7 +198,7 @@ def build_phase_report(df: pd.DataFrame) -> str:
     }
     for col_name, (label, direction) in score_map.items():
         if col_name in df.columns:
-            score_rows.append(dual_num_row(label, col_name, direction))
+            score_rows.append(dual_num_row(label, col_name, direction, min_cov=0.20))
 
     sections = [
         build_section("Horários — mediana (principal) · μ média", [
