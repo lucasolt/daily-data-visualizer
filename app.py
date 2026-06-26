@@ -57,7 +57,9 @@ PALETTE = {
     "Cognição": OK["blue"],
     "Atenção": OK["purple"],
     "Humor": OK["green"],
+    "Iniciativa/Drive": OK["yellow"],
     "Fluência/espontaneidade": OK["vermillion"],
+    
 }
 SLEEP_STAGE_COLORS = {
     "deep_sleep_h": (OK["blue"], "Profundo"),
