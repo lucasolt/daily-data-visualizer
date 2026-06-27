@@ -216,10 +216,12 @@ def filtered_default(saved_list, valid_options):
 
 
 def clamp_period(saved_start, saved_end, dmin, dmax):
-    """saved_* podem ser strings ISO (vindas do JSON) ou None. Retorna (start, end) válidos
-    dentro de [dmin, dmax], ou (dmin, dmax) se algo estiver malformado ou totalmente fora do range."""
+    """saved_* podem ser strings ISO, None, ou o sentinela "__max__" (= sempre o último
+    dia disponível). Retorna (start, end) válidos dentro de [dmin, dmax]."""
     import datetime as _dt
     try:
+        if saved_end == "__max__":
+            saved_end = dmax
         if isinstance(saved_start, str):
             saved_start = _dt.date.fromisoformat(saved_start)
         if isinstance(saved_end, str):
@@ -338,13 +340,19 @@ else:
         key="_period_widget",
         on_change=lambda: (
             st.session_state.__setitem__("period_start", st.session_state["_period_widget"][0]),
-            st.session_state.__setitem__("period_end", st.session_state["_period_widget"][1]),
+            st.session_state.__setitem__(
+                "period_end",
+                "__max__" if st.session_state["_period_widget"][1] >= dmax
+                else st.session_state["_period_widget"][1],
+            ),
             autosave(),
         ),
     )
     # garante que period_start/end estejam no session_state mesmo sem on_change ter disparado ainda
     st.session_state.setdefault("period_start", period[0])
-    st.session_state.setdefault("period_end", period[1])
+    st.session_state.setdefault(
+        "period_end", "__max__" if period[1] >= dmax else period[1]
+    )
 df = df[(df["date"].dt.date >= period[0]) & (df["date"].dt.date <= period[1])]
 
 # ------------------------------------------------ filtro de fase
