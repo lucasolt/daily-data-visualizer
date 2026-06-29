@@ -17,6 +17,7 @@ SCORE_COLS = [
     "cognition_score",
     "attention_score",
     "mood_score",
+    "drive_score",
     "fluencia_verbal_espontaneidade_social",
 ]
 
@@ -25,6 +26,7 @@ SCORE_LABELS = {
     "cognition_score": "Cognição",
     "attention_score": "Atenção",
     "mood_score": "Humor",
+    "drive_score": "Iniciativa/Drive",
     "fluencia_verbal_espontaneidade_social": "Fluência/espontaneidade",
 }
 
