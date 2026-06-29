@@ -17,6 +17,13 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from scipy import stats as sps
 
+try:
+    import statsmodels.api as sm
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+except ImportError:
+    st.error("statsmodels não instalado. Adicione `statsmodels` ao requirements.txt.")
+    st.stop()
+
 import data_prep as dp
 import registry as rg
 
@@ -27,6 +34,7 @@ st.set_page_config(page_title="Níveis diários", page_icon="📈", layout="wide
 # ---------------------------------------------------------------- tema / paleta
 
 # Okabe–Ito: paleta segura para as formas comuns de daltonismo (deutan/protan/tritan).
+# Substitui o verde+vermelho lado a lado e o RdBu da versão anterior.
 OK = {
     "orange": "#E69F00",
     "skyblue": "#56B4E9",
@@ -38,21 +46,21 @@ OK = {
     "grey": "#888888",
     "black": "#1A1A1A",
     # dark theme surfaces
-    "bg":      "#0E1117",
-    "surface": "#1A1D27",
+    "bg":      "#0E1117",   # fundo do papel (igual ao Streamlit dark)
+    "surface": "#1A1D27",   # fundo do plot area
     "grid":    "rgba(255,255,255,0.07)",
     "text":    "#E0E0E0",
     "subtext": "#9AA0B2",
 }
 
-# PALETTE base (constantes). Quando há registro, é estendida/substituída pela
-# camada de "registro efetivo" (ver mais abaixo). Mantida aqui como fallback.
 PALETTE = {
     "Energia": OK["orange"],
     "Cognição": OK["blue"],
     "Atenção": OK["purple"],
     "Humor": OK["green"],
+    "Iniciativa/Drive": OK["yellow"],
     "Fluência/espontaneidade": OK["vermillion"],
+    
 }
 SLEEP_STAGE_COLORS = {
     "deep_sleep_h": (OK["blue"], "Profundo"),
@@ -60,11 +68,13 @@ SLEEP_STAGE_COLORS = {
     "rem_sleep_h": (OK["purple"], "REM"),
     "awake_sleep_h": ("#BFBFBF", "Acordado"),
 }
+# escala divergente CB-safe pra matriz de correlação (vermelho–azul é seguro p/ deutan/protan)
 DIVERGING = "RdBu_r"
 SEQ = "Teal"
 
 FONT = "Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
 
+# template global — dark
 _base = pio.templates["plotly_dark"]
 _base.layout.font = dict(family=FONT, size=13, color=OK["text"])
 _base.layout.title.font = dict(family=FONT, size=16, color=OK["text"])
@@ -103,7 +113,10 @@ def style_fig(fig, height=None, legend_top=True):
 
 
 def add_phase_vlines(fig, change_points, subplot=False, annotate=True):
-    """Linha vertical tracejada em cada troca de fase. Anota o rótulo da nova fase."""
+    """Linha vertical tracejada em cada troca de fase. Anota o rótulo da nova fase.
+
+    subplot=True -> desenha em todas as linhas/colunas de um make_subplots.
+    """
     if not change_points:
         return fig
     rc = dict(row="all", col="all") if subplot else {}
@@ -140,7 +153,9 @@ def _supabase_headers():
 
 @st.cache_data(ttl=10, show_spinner=False)
 def _load_prefs_cached(_cache_buster: int = 0) -> dict:
-    """Lê o blob de prefs salvo. Qualquer falha degrada silenciosamente para {}."""
+    """Lê o blob de prefs salvo. Qualquer falha (sem secrets, sem rede, linha
+    inexistente) degrada silenciosamente para {} — defaults hardcoded da UI valem.
+    """
     base_url = st.secrets.get("supabase_url", "")
     if not base_url or not st.secrets.get("supabase_key", ""):
         return {}
@@ -161,7 +176,9 @@ def _load_prefs_cached(_cache_buster: int = 0) -> dict:
 
 
 def save_prefs(prefs: dict) -> None:
-    """Upsert fire-and-forget do blob de prefs. Nunca propaga exceção."""
+    """Upsert fire-and-forget do blob de prefs. Nunca propaga exceção —
+    falha de rede aqui não pode derrubar o dashboard.
+    """
     base_url = st.secrets.get("supabase_url", "")
     if not base_url or not st.secrets.get("supabase_key", ""):
         return
@@ -175,6 +192,7 @@ def save_prefs(prefs: dict) -> None:
         )
     except Exception:
         pass
+    # invalida o cache de leitura pra próxima sessão pegar o valor novo
     _load_prefs_cached.clear()
 
 
@@ -190,8 +208,25 @@ def saved_or(key, fallback):
     return SAVED[key] if key in SAVED and SAVED[key] is not None else fallback
 
 
+# ---------------------------------------------------------------- registro de colunas
+# O registro de schema (column_registry) é uma chave no blob de prefs.
+# Vazio => app usa as constantes do data_prep (comportamento idêntico ao anterior).
+COLUMN_REGISTRY = saved_or("column_registry", []) or []
+
+
+def save_registry(reg_list: list) -> None:
+    """Persiste o registro como mais uma chave no blob de prefs, sem apagar o resto."""
+    global SAVED, COLUMN_REGISTRY
+    prefs = dict(SAVED)
+    prefs["column_registry"] = reg_list
+    save_prefs(prefs)
+    st.session_state["saved_prefs"] = prefs
+    SAVED = prefs
+    COLUMN_REGISTRY = reg_list
+
+
 def filtered_default(saved_list, valid_options):
-    """Filtra uma lista salva contra as opções válidas atuais."""
+    """Filtra uma lista salva contra as opções válidas atuais (colunas podem ter sumido)."""
     if not isinstance(saved_list, list):
         return None
     out = [c for c in saved_list if c in valid_options]
@@ -199,9 +234,12 @@ def filtered_default(saved_list, valid_options):
 
 
 def clamp_period(saved_start, saved_end, dmin, dmax):
-    """saved_* podem ser strings ISO ou None. Retorna (start, end) válidos em [dmin, dmax]."""
+    """saved_* podem ser strings ISO, None, ou o sentinela "__max__" (= sempre o último
+    dia disponível). Retorna (start, end) válidos dentro de [dmin, dmax]."""
     import datetime as _dt
     try:
+        if saved_end == "__max__":
+            saved_end = dmax
         if isinstance(saved_start, str):
             saved_start = _dt.date.fromisoformat(saved_start)
         if isinstance(saved_end, str):
@@ -219,29 +257,11 @@ def clamp_period(saved_start, saved_end, dmin, dmax):
         return dmin, dmax
 
 
-# ---------------------------------------------------------------- registro de colunas
-
-# O registro de schema (column_registry) é uma chave no blob de prefs.
-# Vazio => app usa as constantes do data_prep (comportamento idêntico ao anterior).
-COLUMN_REGISTRY = saved_or("column_registry", []) or []
-
-
-def save_registry(reg_list: list) -> None:
-    """Persiste o registro como mais uma chave no blob de prefs, sem apagar o resto."""
-    global SAVED, COLUMN_REGISTRY
-    prefs = dict(SAVED)
-    prefs["column_registry"] = reg_list
-    save_prefs(prefs)
-    st.session_state["saved_prefs"] = prefs
-    SAVED = prefs
-    COLUMN_REGISTRY = reg_list
-
-
 # keys simples (lidas direto do session_state, valor já serializável em JSON)
 _AUTOSAVE_SIMPLE_KEYS = [
     "period_start", "period_end", "fases_sel", "roll", "show_phase_lines",
     "scores_chosen",
-    "reg_y", "reg_x", "target_mode", "include_fase", "ctrl_trend", "ctrl_weekend", "ctrl_monday",
+    "reg_y", "reg_x", "target_mode", "include_fase", "fase_coding", "ctrl_trend", "ctrl_weekend", "ctrl_monday",
     "corr_x_col", "corr_y_col", "corr_lag", "corr_color_by_phase",
     "matrix_cols", "matrix_method",
     "emo_chosen", "emo_roll",
@@ -250,9 +270,13 @@ _AUTOSAVE_SIMPLE_KEYS = [
 
 
 def autosave():
-    """Lê os widgets atuais do session_state e salva o blob inteiro."""
+    """Lê os widgets atuais (de qualquer aba) do session_state e salva o blob inteiro.
+    Chamado via on_change dos próprios widgets -> autosave silencioso.
+    Mantém prefs já salvas de outras abas que não estão montadas nesta execução
+    (ex: salvar na sidebar não deve apagar o que foi salvo em Emoções).
+    """
     global SAVED
-    prefs = dict(SAVED)
+    prefs = dict(SAVED)  # parte do que já estava salvo, sobrescreve com o que está em tela
     for k in _AUTOSAVE_SIMPLE_KEYS:
         if k in st.session_state:
             v = st.session_state[k]
@@ -270,7 +294,7 @@ def autosave():
             pred_cfg_out[c] = [int(lg), int(mm)]
     prefs["pred_cfg"] = pred_cfg_out
 
-    # preserva o registro já salvo (autosave de outras abas não pode apagá-lo)
+    # preserva o registro de colunas (autosave de outras abas não pode apagá-lo)
     if "column_registry" in SAVED:
         prefs["column_registry"] = SAVED["column_registry"]
 
@@ -289,12 +313,19 @@ CACHE_TTL = 300  # segundos
 @st.cache_data(ttl=CACHE_TTL, show_spinner="Carregando planilha...")
 def fetch(url: str, _registry_key: str = "") -> pd.DataFrame:
     """_registry_key entra na assinatura só pra invalidar o cache quando o
-    registro muda (parsing depende dele). O valor em si não é usado aqui."""
+    registro muda (o parsing depende dele). O valor em si não é usado aqui."""
     return dp.prepare(dp.load_csv(url), registry=COLUMN_REGISTRY or None)
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def fetch_raw(url: str) -> pd.DataFrame:
+    """CSV cru (strings, pré-prepare) pra varredura do registro."""
+    return dp.load_csv(url)
 
 
 # chave de cache derivada do registro: muda => refaz o prepare
 _reg_cache_key = json.dumps(COLUMN_REGISTRY, sort_keys=True) if COLUMN_REGISTRY else ""
+
 
 default_url = st.secrets.get("sheet_csv_url", "")
 url = st.sidebar.text_input(
@@ -308,12 +339,6 @@ uploaded = st.sidebar.file_uploader("…ou subir CSV manualmente", type="csv")
 if st.sidebar.button("🔄 Recarregar agora"):
     st.cache_data.clear()
     st.rerun()
-
-# guarda o CSV cru (strings) pra varredura do registro, sem reprocessar
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_raw(url: str) -> pd.DataFrame:
-    return dp.load_csv(url)
-
 
 df = None
 df_raw = None
@@ -336,26 +361,29 @@ if df is None or df.empty:
 
 # ---------------------------------------------------------------- registro efetivo
 # Resolve, UMA vez, as estruturas que o resto do app usa: scores, labels, paleta,
-# meds. Com registro => deriva dele. Sem registro => constantes (idêntico ao atual).
+# meds. Com registro => deriva dele (estendendo as constantes). Sem registro =>
+# constantes puras (idêntico ao comportamento anterior).
 
-def _build_effective(df, registry):
-    rmap = rg.registry_to_map(registry) if registry else {}
-    if rmap and rg.scores(rmap):
-        sc = [c for c in rg.scores(rmap) if c in df.columns]
-        labels = dict(dp.SCORE_LABELS)
-        labels.update(rg.score_labels(rmap))
-        dirs = rg.score_directions(rmap)
-        palette = dict(PALETTE)  # mantém base; estende/sobrescreve por label
-        for i, c in enumerate(sc):
-            lbl = labels.get(c, c)
-            palette[lbl] = rg.color_for(rmap, c, i)
-        med_cols = [c for c in rg.meds(rmap) if c in df.columns]
-        return sc, labels, dirs, palette, med_cols
-    # fallback: constantes
-    sc = [c for c in dp.SCORE_COLS if c in df.columns]
+def _build_effective(_df, registry):
     labels = dict(dp.SCORE_LABELS)
+    palette = dict(PALETTE)
+    if registry and rg.registry_to_map(registry):
+        rmap = rg.registry_to_map(registry)
+        if rg.scores(rmap):
+            sc = [c for c in rg.scores(rmap) if c in _df.columns]
+            labels.update(rg.score_labels(rmap))
+            dirs = rg.score_directions(rmap)
+            for i, c in enumerate(sc):
+                lbl = labels.get(c, c)
+                # mantém a cor já existente na PALETTE; só cria pra score sem cor
+                if lbl not in palette:
+                    palette[lbl] = rg.color_for(rmap, c, i)
+            med_cols = [c for c in rg.meds(rmap) if c in _df.columns]
+            return sc, labels, dirs, palette, med_cols
+    # fallback: constantes
+    sc = [c for c in dp.SCORE_COLS if c in _df.columns]
     dirs = {c: "higher" for c in dp.SCORE_COLS}
-    return sc, labels, dirs, dict(PALETTE), None
+    return sc, labels, dirs, palette, None
 
 
 SCORE_COLS_EFF, SCORE_LABELS_EFF, SCORE_DIRS_EFF, PALETTE_EFF, MED_COLS_EFF = \
@@ -388,12 +416,19 @@ else:
         key="_period_widget",
         on_change=lambda: (
             st.session_state.__setitem__("period_start", st.session_state["_period_widget"][0]),
-            st.session_state.__setitem__("period_end", st.session_state["_period_widget"][1]),
+            st.session_state.__setitem__(
+                "period_end",
+                "__max__" if st.session_state["_period_widget"][1] >= dmax
+                else st.session_state["_period_widget"][1],
+            ),
             autosave(),
         ),
     )
+    # garante que period_start/end estejam no session_state mesmo sem on_change ter disparado ainda
     st.session_state.setdefault("period_start", period[0])
-    st.session_state.setdefault("period_end", period[1])
+    st.session_state.setdefault(
+        "period_end", "__max__" if period[1] >= dmax else period[1]
+    )
 df = df[(df["date"].dt.date >= period[0]) & (df["date"].dt.date <= period[1])]
 
 # ------------------------------------------------ filtro de fase
@@ -403,7 +438,8 @@ if has_fase:
     _fases_default = filtered_default(SAVED.get("fases_sel"), fase_opts) or fase_opts
     fases_sel = st.sidebar.multiselect(
         "Fase", fase_opts, default=_fases_default,
-        help="Vazio = todas. Filtrar fases pode deixar o período não-contíguo.",
+        help="Vazio = todas. Filtrar fases pode deixar o período não-contíguo — "
+        "a média móvel atravessa os buracos e as linhas de troca refletem o que sobrou.",
         key="fases_sel", on_change=autosave,
     )
     if fases_sel and len(fases_sel) < len(fase_opts):
@@ -424,7 +460,6 @@ show_phase_lines = st.sidebar.checkbox(
     key="show_phase_lines", on_change=autosave,
 )
 
-# score_cols e meds agora vêm do registro efetivo
 score_cols = [c for c in SCORE_COLS_EFF if c in df.columns]
 meds = dp.active_meds(df, med_cols=MED_COLS_EFF)
 change_points = dp.phase_change_points(df) if (has_fase and show_phase_lines) else []
@@ -460,21 +495,33 @@ def line_with_roll(fig, x, y, name, color, window, row=None, col=None):
 
 
 def med_label(m: str) -> str:
-    """Rótulo de med: usa o do registro efetivo se houver, senão deriva do nome."""
-    lbl = SCORE_LABELS_EFF.get(m)  # SCORE_LABELS_EFF só tem scores; meds não entram aqui
-    rmap = rg.registry_to_map(COLUMN_REGISTRY) if COLUMN_REGISTRY else {}
-    e = rmap.get(m)
-    if e and e.get("kind") == "med" and e.get("label"):
-        return e["label"]
+    """Rótulo de med: usa o do registro se houver, senão deriva do nome."""
+    if COLUMN_REGISTRY:
+        e = rg.registry_to_map(COLUMN_REGISTRY).get(m)
+        if e and e.get("kind") == "med" and e.get("label"):
+            return e["label"]
     return m.replace("_mg_total", "").replace("_mg", "").replace("_", " ")
+
+
+def sum_to_zero_dummies(s: pd.Categorical, categories: list, prefix: str = "fase") -> pd.DataFrame:
+    """Codificação soma-zero: referência implícita = última categoria, recebe -1
+    em vez de 0 nas demais colunas. Intercepto vira a média geral (não a média
+    de uma categoria específica) — cada coeficiente é o desvio dessa fase em
+    relação à média de todas as fases, diretamente comparável entre si."""
+    out = pd.DataFrame(index=s.index)
+    ref = categories[-1]
+    for cat in categories[:-1]:
+        col = pd.Series(0.0, index=s.index)
+        col[s == cat] = 1.0
+        col[s == ref] = -1.0
+        out[f"{prefix}_{cat}"] = col
+    return out
 
 
 # ---------------------------------------------------------------- tabs
 
-(tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_emo,
- tab_fases, tab_dados, tab_reg) = st.tabs(
-    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações",
-     "Emoções", "Fases", "Dados", "Registro"]
+tab_vis, tab_scores, tab_sono, tab_med, tab_atv, tab_corr, tab_emo, tab_fases, tab_dados, tab_reg = st.tabs(
+    ["Visão geral", "Scores", "Sono", "Medicações", "Atividade", "Correlações", "Emoções", "Fases", "Dados", "Registro"]
 )
 
 # ------------------------------------------------ visão geral
@@ -629,6 +676,7 @@ with tab_med:
         )
         style_fig(fig, height=90 + 44 * len(meds), legend_top=False)
         fig.update_layout(title="Doses por dia (intensidade relativa ao máximo de cada fármaco)")
+        # vlines no heatmap (eixo x temporal)
         for cp in change_points:
             fig.add_vline(x=cp["date"], line=dict(color="rgba(0,0,0,0.5)", width=1.2, dash="dot"))
         st.plotly_chart(fig, width="stretch")
@@ -675,6 +723,7 @@ with tab_corr:
     )
     med_set = set(meds)
 
+    # ---- dispersão / fármaco ----
     st.markdown("##### Dispersão com lag")
     c1, c2, c3 = st.columns([2, 2, 1])
     _saved_x_col = saved_or("corr_x_col", None)
@@ -688,21 +737,24 @@ with tab_corr:
     y_col = c2.selectbox("Y (desfecho)", num_cols, index=_y_idx,
                          key="corr_y_col", on_change=autosave)
     lag = c3.number_input("Lag (dias)", 0, 7, int(saved_or("corr_lag", 0)),
-                          help="X de k dias atrás vs Y de hoje.",
+                          help="X de k dias atrás vs Y de hoje. Ex.: sono de ontem → humor de hoje = lag 1.",
                           key="corr_lag", on_change=autosave)
 
     x_is_med = x_col in med_set
     med_mode = None
     if x_is_med:
         opts = ["Titulação (só dias em uso)", "Uso vs não-uso (todos os dias)"]
+        # se não varia entre dias de uso, titulação não informa — sugere o outro modo
         if not dp.med_varies_within_use(df, x_col):
             opts = opts[::-1]
         med_mode = st.radio(
             f"Modo para **{med_label(x_col)}**", opts, horizontal=True,
-            help="Titulação isola dose-resposta. Uso vs não-uso compara desfecho com/sem o fármaco.",
+            help="Titulação isola dose-resposta nos dias em que o fármaco foi usado. "
+            "Uso vs não-uso compara o desfecho entre dias com e sem o fármaco (efeito liga/desliga).",
         )
 
     if x_is_med and med_mode and med_mode.startswith("Uso"):
+        # boxplot uso vs não-uso (lag aplicado ao indicador)
         used = (df[x_col].fillna(0) > 0).astype(int).shift(lag)
         comp = pd.DataFrame({"used": used, "y": df[y_col]}).dropna()
         g0 = comp.loc[comp["used"] == 0, "y"]
@@ -722,11 +774,12 @@ with tab_corr:
             st.caption(
                 f"n_com = {len(g1)} · n_sem = {len(g0)} · "
                 f"Δmediana = {d_md:+.2f} · Mann–Whitney U = {u:.0f} (p = {pu:.3f}). "
-                "Teste não-paramétrico, sem ajuste para confundidores."
+                "Teste não-paramétrico, sem ajuste para confundidores (fase, outros fármacos)."
             )
         else:
             st.warning("Poucos dias em algum dos grupos (com/sem) pra comparar.")
     else:
+        # dispersão contínua; se for fármaco em modo titulação, restringe a dose>0
         x_raw = df[x_col].shift(lag)
         pair = pd.DataFrame({
             "x": x_raw.values, "y": df[y_col].values,
@@ -782,11 +835,13 @@ with tab_corr:
         else:
             st.warning("Poucos pares válidos pra esse cruzamento.")
 
+    # ---- regressão multivariável ----
     st.markdown("---")
     st.markdown("##### Regressão (OLS) com transformações")
     st.caption(
         "Modelo descritivo, não causal. Séries diárias são autocorrelacionadas — "
-        "use AR(1) ou Δ pra não inflar a significância. Leia os n por fase antes de interpretar."
+        "use AR(1) ou Δ pra não inflar a significância. Leia os n por fase antes de interpretar. "
+        "As escolhas abaixo são salvas automaticamente e voltam na próxima sessão."
     )
 
     _saved_reg_y = saved_or("reg_y", None)
@@ -802,12 +857,13 @@ with tab_corr:
     _mode_opts = ["Nível (cru)", "AR(1): incluir Y(t-1)", "Δ alvo (primeira diferença)"]
     _saved_mode = saved_or("target_mode", "Nível (cru)")
     _mode_idx = _mode_opts.index(_saved_mode) if _saved_mode in _mode_opts else 0
+    # AR(1) e Δ-no-alvo são estratégias concorrentes p/ a mesma autocorrelação → exclusivas
     target_mode = st.radio(
         "Transformação do alvo / autocorrelação",
         _mode_opts, index=_mode_idx, horizontal=True,
         key="target_mode", on_change=autosave,
-        help="Nível = Y bruto. AR(1) adiciona Y de ontem. Δ modela a variação diária. "
-        "AR(1) e Δ são mutuamente exclusivos.",
+        help="Nível = Y bruto. AR(1) adiciona Y de ontem como preditor (controla a inércia). "
+        "Δ modela a variação diária de Y. AR(1) e Δ são mutuamente exclusivos de propósito.",
     )
 
     _candidate_x = [c for c in num_cols if c != reg_y]
@@ -820,10 +876,11 @@ with tab_corr:
         key="reg_x", on_change=autosave,
     )
 
+    # transformação por preditor (lag e/ou média móvel próprios)
     _saved_pred_cfg = saved_or("pred_cfg", {}) or {}
     pred_cfg = {}
     if reg_x:
-        st.caption("Transformação por preditor (lag = dias atrás; MM = média móvel de N dias):")
+        st.caption("Transformação por preditor (lag = dias atrás; MM = média móvel de N dias até o dia):")
         for c in reg_x:
             cc1, cc2, cc3 = st.columns([3, 1, 1])
             cc1.markdown(f"&nbsp;**{med_label(c)}**", unsafe_allow_html=True)
@@ -841,10 +898,21 @@ with tab_corr:
         disabled=not has_fase, key="include_fase", on_change=autosave,
         help="Deslocamentos de nível entre fases.",
     )
+    fase_coding = cctrl1.radio(
+        "Referência da fase", ["vs. fase_1", "vs. média geral"],
+        index=(0 if saved_or("fase_coding", "vs. fase_1") == "vs. fase_1" else 1),
+        disabled=not (has_fase and include_fase),
+        key="fase_coding", on_change=autosave,
+        help="vs. fase_1: cada coeficiente é o delta em relação à fase_1 (regime "
+        "farmacológico de base, mas não necessariamente um período humoral neutro). "
+        "vs. média geral: cada coeficiente é o desvio em relação à média de todas as "
+        "fases — mais comparável entre fases, sem depender de qual foi escolhida como referência.",
+    )
     ctrl_trend = cctrl1.checkbox(
         "Tendência linear (trend)", value=bool(saved_or("ctrl_trend", False)),
         key="ctrl_trend", on_change=autosave,
-        help="Dia-índice como preditor.",
+        help="Dia-índice como preditor. Sem isso, duas variáveis que só melhoram no tempo "
+        "correlacionam espúrio.",
     )
     ctrl_weekend = cctrl2.checkbox(
         "Dummy fim de semana", value=bool(saved_or("ctrl_weekend", False)),
@@ -856,18 +924,13 @@ with tab_corr:
     )
 
     if st.button("Rodar regressão"):
-        try:
-            import statsmodels.api as sm
-        except ImportError:
-            st.error("statsmodels não instalado. Adicione `statsmodels` ao requirements.txt.")
-            st.stop()
-
         if not reg_x and not include_fase and target_mode == "Nível (cru)" and not (
             ctrl_trend or ctrl_weekend or ctrl_monday):
             st.warning("Escolha ao menos um preditor ou uma transformação.")
         else:
             d = df.sort_values("date").reset_index(drop=True).copy()
 
+            # ---- monta o alvo ----
             y = d[reg_y].astype(float)
             y_name = reg_y
             if target_mode.startswith("Δ"):
@@ -877,11 +940,13 @@ with tab_corr:
             reg = pd.DataFrame({y_name: y})
             built, collinear = [], []
 
+            # ---- AR(1) ----
             if target_mode.startswith("AR"):
                 ar_name = f"{reg_y}__lag1"
                 reg[ar_name] = d[reg_y].astype(float).shift(1)
                 built.append(ar_name)
 
+            # ---- preditores transformados ----
             for c in reg_x:
                 lg, mm = pred_cfg[c]
                 s = d[c].astype(float)
@@ -892,11 +957,13 @@ with tab_corr:
                 nm = c + (f"_mm{mm}" if mm > 1 else "") + (f"_lag{lg}" if lg > 0 else "")
                 reg[nm] = s
                 built.append(nm)
+                # colinearidade com fase (constante dentro de cada fase)
                 if include_fase:
                     g = d.assign(_v=s).groupby("fase_label")["_v"].nunique(dropna=True)
                     if (g.fillna(0) <= 1).all():
                         collinear.append(med_label(c))
 
+            # ---- controles temporais ----
             if ctrl_trend:
                 reg["trend"] = np.arange(len(d), dtype=float)
                 built.append("trend")
@@ -907,9 +974,19 @@ with tab_corr:
                 reg["monday"] = (d["date"].dt.weekday == 0).astype(float)
                 built.append("monday")
 
+            # ---- fase como dummies ----
             fase_cols = []
             if include_fase:
-                dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                # fixa a ordem numérica das fases (1, 2, ..., 6.5) em vez da ordem
+                # alfabética padrão do pandas
+                fase_order_list = dp.fase_order(d["fase_label"].unique())
+                d["fase_label"] = pd.Categorical(
+                    d["fase_label"], categories=fase_order_list, ordered=True
+                )
+                if fase_coding == "vs. fase_1":
+                    dummies = pd.get_dummies(d["fase_label"], prefix="fase", drop_first=True, dtype=float)
+                else:
+                    dummies = sum_to_zero_dummies(d["fase_label"], fase_order_list)
                 for col in dummies.columns:
                     reg[col] = dummies[col].values
                 fase_cols = list(dummies.columns)
@@ -919,14 +996,15 @@ with tab_corr:
                 st.warning(
                     "⚠️ Colinear com a fase (constante dentro de cada fase): "
                     + ", ".join(collinear)
-                    + ". O efeito desses preditores não é separável do da fase. "
-                    "Remova-os OU tire a fase."
+                    + ". O efeito desses preditores não é separável do da fase — "
+                    "coeficiente instável. Remova-os OU tire a fase."
                 )
 
             reg = reg.dropna()
             k = len(built)
             if len(reg) < k + 2:
-                st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos.")
+                st.warning(f"Poucas observações completas (n = {len(reg)}) pra {k} termos. "
+                           "Lags e médias móveis grandes cortam linhas do começo da série.")
             else:
                 X = sm.add_constant(reg[built], has_constant="add")
                 res = sm.OLS(reg[y_name], X).fit()
@@ -935,7 +1013,100 @@ with tab_corr:
                     "t": res.tvalues, "p": res.pvalues,
                     "IC 2.5%": res.conf_int()[0], "IC 97.5%": res.conf_int()[1],
                 }).round(3)
-                st.dataframe(coefs, width="stretch")
+
+                # ---- coeficiente implícito da fase de referência (só em sum-to-zero) ----
+                # em "vs. média geral", a última fase da ordem numérica vira a referência
+                # implícita e não ganha coluna própria — mas seu coeficiente existe e é
+                # recuperável por combinação linear: coef = -soma(demais fase_*), com
+                # EP/t/p derivados via res.cov_params(). Validado contra reparametrização
+                # direta (trocar qual fase fica de fora) — bate exatamente.
+                if include_fase and fase_coding == "vs. média geral" and fase_cols:
+                    ref_fase = fase_order_list[-1]
+                    L = pd.Series(0.0, index=res.params.index)
+                    L[fase_cols] = -1.0
+                    coef_ref = float(L @ res.params)
+                    var_ref = float(L.values @ res.cov_params().values @ L.values)
+                    se_ref = float(np.sqrt(var_ref)) if var_ref > 0 else float("nan")
+                    t_ref = coef_ref / se_ref if se_ref else float("nan")
+                    from scipy import stats as _sps
+                    df_resid = res.df_resid
+                    p_ref = 2 * (1 - _sps.t.cdf(abs(t_ref), df_resid)) if se_ref else float("nan")
+                    ci_lo = coef_ref - _sps.t.ppf(0.975, df_resid) * se_ref if se_ref else float("nan")
+                    ci_hi = coef_ref + _sps.t.ppf(0.975, df_resid) * se_ref if se_ref else float("nan")
+                    coefs.loc[f"fase_{ref_fase} (ref., implícito)"] = {
+                        "coef": round(coef_ref, 3), "EP": round(se_ref, 3),
+                        "t": round(t_ref, 3), "p": round(p_ref, 3),
+                        "IC 2.5%": round(ci_lo, 3), "IC 97.5%": round(ci_hi, 3),
+                    }
+
+                # ---- beta padronizado: coef * (DP do preditor / DP do alvo) ----
+                # aplicado a TODAS as variáveis com coluna própria em X, incluindo dummies
+                # (fase_*, weekend, monday). A fase de referência implícita (sum-to-zero)
+                # fica de fora: seu coeficiente é bem definido (combinação linear, validado),
+                # mas o "DP do preditor" não tem uma definição única pra ela — ela é
+                # definida pela ausência nas outras colunas, não por uma coluna própria.
+                # Padronizar exigiria escolher uma convenção arbitrária; deixo NaN em vez
+                # de reportar um número que pareceria preciso sem ser.
+                dp_y = reg[y_name].std()
+                beta_std = []
+                for term in coefs.index:
+                    if term == "const" or term not in X.columns:
+                        beta_std.append(np.nan)
+                        continue
+                    col = X[term]
+                    beta_std.append(coefs.loc[term, "coef"] * col.std() / dp_y)
+                coefs["coef padronizado (β, DP)"] = pd.Series(beta_std, index=coefs.index).round(3)
+
+                # reordena: coef, padronizado, p primeiro; IC no meio; EP/t por último
+                coefs = coefs[[
+                    "coef", "coef padronizado (β, DP)", "p",
+                    "IC 2.5%", "IC 97.5%", "EP", "t",
+                ]]
+
+                def _highlight_sig(row):
+                    sig = row["p"] < 0.05
+                    style = "font-weight: bold; background-color: rgba(0,200,150,0.18)" if sig else ""
+                    return [style] * len(row)
+
+                st.dataframe(
+                    coefs.style.apply(_highlight_sig, axis=1).format(precision=3),
+                    width="stretch",
+                )
+
+                # ---- estatísticas descritivas das variáveis no fit (pós-dropna) ----
+                desc_cols = [y_name] + built
+                desc_rows = []
+                for c in desc_cols:
+                    s = reg[c].astype(float)
+                    desc_rows.append({
+                        "variável": c,
+                        "média": s.mean(),
+                        "DP": s.std(),
+                        "mín": s.min(),
+                        "máx": s.max(),
+                        "amplitude": s.max() - s.min(),
+                    })
+                desc_df = pd.DataFrame(desc_rows).round(3)
+                st.markdown("###### Descritivas (n = linhas que entraram no fit)")
+                st.dataframe(desc_df, width="stretch", hide_index=True)
+
+                # ---- VIF (multicolinearidade por preditor) ----
+                if len(built) >= 2:
+                    vif_df = pd.DataFrame({
+                        "preditor": X.columns,
+                        "VIF": [variance_inflation_factor(X.values.astype(float), i)
+                                for i in range(X.shape[1])],
+                    })
+                    vif_df = vif_df[vif_df["preditor"] != "const"].round(2)
+                    st.markdown("###### VIF (Variance Inflation Factor)")
+                    st.dataframe(vif_df, width="stretch", hide_index=True)
+                    st.caption(
+                        "VIF > 5–10 sugere multicolinearidade preocupante para esse termo. "
+                        "Dummies de uma mesma categórica (ex.: fase) são correlacionadas entre si "
+                        "por construção e tendem a VIF elevado mesmo sem problema real — "
+                        "interprete junto com o número de condição acima, não isoladamente."
+                    )
+
                 terms_txt = " + ".join(built) if built else "const"
                 st.caption(
                     f"`{y_name} ~ {terms_txt}` · n = {int(res.nobs)} · R² = {res.rsquared:.3f} · "
@@ -944,11 +1115,13 @@ with tab_corr:
                     + ("  (alto → multicolinearidade)" if res.condition_number > 100 else "")
                 )
                 if target_mode.startswith("AR"):
-                    st.caption("AR(1): o coeficiente de Y(t-1) capta a inércia.")
+                    st.caption("AR(1): o coeficiente de Y(t-1) capta a inércia; os demais são efeitos "
+                               "*além* da persistência do próprio Y.")
                 if include_fase:
                     npf = d.groupby("fase_label")[reg_y].size()
                     st.caption("n por fase: " + " · ".join(f"{k_}: {v}" for k_, v in npf.items()))
 
+    # ---- matriz de correlação ----
     st.markdown("---")
     st.markdown("##### Matriz de correlação")
     default_matrix = [c for c in (
@@ -978,80 +1151,6 @@ with tab_corr:
     else:
         st.info("Selecione ao menos duas variáveis.")
 
-# ------------------------------------------------ emoções
-with tab_emo:
-    vocab_all = dp.emotion_vocabulary(df)
-    if not vocab_all:
-        st.info("Sem coluna `emotion_keywords` com dados no período.")
-    else:
-        st.caption(
-            "Frequência de cada emoção ao longo do tempo. A linha é a média móvel — "
-            "proporção de dias com a emoção numa janela."
-        )
-        c1, c2 = st.columns([3, 1])
-        default_top = vocab_all[:min(6, len(vocab_all))]
-        _emo_default = filtered_default(saved_or("emo_chosen", None), vocab_all) or default_top
-        chosen_emo = c1.multiselect(
-            "Emoções", vocab_all, default=_emo_default,
-            format_func=lambda e: f"{e}",
-            help="Ordenadas por frequência.",
-            key="emo_chosen", on_change=autosave,
-        )
-        emo_roll = c2.number_input(
-            "Janela MM (dias)", 3, 28, int(saved_or("emo_roll", max(7, roll))),
-            key="emo_roll", on_change=autosave,
-        )
-
-        if chosen_emo:
-            pf = dp.emotion_presence_frame(df, chosen_emo)
-            cmap = [OK["blue"], OK["orange"], OK["green"], OK["vermillion"],
-                    OK["purple"], OK["skyblue"], OK["yellow"], OK["grey"]]
-            fig = go.Figure()
-            for i, e in enumerate(chosen_emo):
-                color = cmap[i % len(cmap)]
-                roll_series = pf[e].rolling(emo_roll, min_periods=max(2, emo_roll // 3)).mean() * 100
-                fig.add_trace(go.Scatter(
-                    x=df["date"], y=pf[e] * 100, mode="markers",
-                    marker=dict(color=color, size=4, opacity=0.18),
-                    legendgroup=e, showlegend=False, hoverinfo="skip",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=df["date"], y=roll_series, mode="lines",
-                    line=dict(color=color, width=2.6, shape="spline"),
-                    name=e, legendgroup=e,
-                    hovertemplate="%{y:.0f}% dos dias<extra>" + e + "</extra>",
-                ))
-            add_phase_vlines(fig, change_points)
-            style_fig(fig, height=460)
-            fig.update_layout(hovermode="x unified",
-                              yaxis_title=f"% de dias com a emoção (MM {emo_roll}d)",
-                              yaxis_range=[0, 100])
-            st.plotly_chart(fig, width="stretch")
-
-            freq = pd.DataFrame({
-                "emoção": chosen_emo,
-                "dias": [int(pf[e].sum()) for e in chosen_emo],
-                "% do período": [f"{pf[e].mean()*100:.1f}%" for e in chosen_emo],
-            })
-            st.caption(f"Vocabulário completo: {len(vocab_all)} emoções distintas.")
-            st.dataframe(freq, width="stretch", hide_index=True)
-        else:
-            st.info("Selecione ao menos uma emoção.")
-
-# ------------------------------------------------ fases
-with tab_fases:
-    if not has_fase or df["fase_label"].nunique() < 2:
-        st.info("Nenhuma fase detectada nos dados do período selecionado.")
-    else:
-        report_html = build_phase_report(df, registry=COLUMN_REGISTRY or None)
-        st.components.v1.html(report_html, height=1200, scrolling=True)
-        st.download_button(
-            "⬇ Baixar relatório HTML",
-            report_html.encode("utf-8"),
-            "relatorio_fases.html",
-            "text/html",
-        )
-
 # ------------------------------------------------ dados
 with tab_dados:
     st.dataframe(df, width="stretch", height=520)
@@ -1063,15 +1162,10 @@ with tab_dados:
     )
 
     with st.expander("Distribuição de uma variável"):
-        num_cols_d = sorted(
-            c for c in df.columns
-            if pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().sum() >= 5
-            and c not in ("weekday", "fase")
-        )
         _saved_hist_var = saved_or("hist_var", None)
-        _hist_idx = (num_cols_d.index(_saved_hist_var) if _saved_hist_var in num_cols_d
-                     else (num_cols_d.index("mood_score") if "mood_score" in num_cols_d else 0))
-        var = st.selectbox("Variável", num_cols_d, index=_hist_idx,
+        _hist_idx = (num_cols.index(_saved_hist_var) if _saved_hist_var in num_cols
+                     else (num_cols.index("mood_score") if "mood_score" in num_cols else 0))
+        var = st.selectbox("Variável", num_cols, index=_hist_idx,
                            key="hist_var", on_change=autosave)
         s = df[var].astype(float)
         only_use = False
@@ -1104,6 +1198,84 @@ with tab_dados:
         else:
             st.info("Poucos valores pra histograma.")
 
+# ------------------------------------------------ emoções
+with tab_emo:
+    vocab_all = dp.emotion_vocabulary(df)
+    if not vocab_all:
+        st.info("Sem coluna `emotion_keywords` com dados no período.")
+    else:
+        st.caption(
+            "Frequência de cada emoção ao longo do tempo: para cada dia, 1 se a emoção foi "
+            "registrada, 0 se não. A linha é a média móvel dessa série — proporção de dias "
+            "com a emoção numa janela. Captura ondas, não causa."
+        )
+        c1, c2 = st.columns([3, 1])
+        default_top = vocab_all[:min(6, len(vocab_all))]
+        _emo_default = filtered_default(saved_or("emo_chosen", None), vocab_all) or default_top
+        chosen_emo = c1.multiselect(
+            "Emoções", vocab_all, default=_emo_default,
+            format_func=lambda e: f"{e}",
+            help="Ordenadas por frequência. Default: as mais frequentes.",
+            key="emo_chosen", on_change=autosave,
+        )
+        emo_roll = c2.number_input(
+            "Janela MM (dias)", 3, 28, int(saved_or("emo_roll", max(7, roll))),
+            key="emo_roll", on_change=autosave,
+        )
+
+        if chosen_emo:
+            pf = dp.emotion_presence_frame(df, chosen_emo)
+            cmap = [OK["blue"], OK["orange"], OK["green"], OK["vermillion"],
+                    OK["purple"], OK["skyblue"], OK["yellow"], OK["grey"]]
+            fig = go.Figure()
+            for i, e in enumerate(chosen_emo):
+                color = cmap[i % len(cmap)]
+                roll_series = pf[e].rolling(emo_roll, min_periods=max(2, emo_roll // 3)).mean() * 100
+                # pontos crus discretos (0/100%) bem leves
+                fig.add_trace(go.Scatter(
+                    x=df["date"], y=pf[e] * 100, mode="markers",
+                    marker=dict(color=color, size=4, opacity=0.18),
+                    legendgroup=e, showlegend=False, hoverinfo="skip",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df["date"], y=roll_series, mode="lines",
+                    line=dict(color=color, width=2.6, shape="spline"),
+                    name=e, legendgroup=e,
+                    hovertemplate="%{y:.0f}% dos dias<extra>" + e + "</extra>",
+                ))
+            add_phase_vlines(fig, change_points)
+            style_fig(fig, height=460)
+            fig.update_layout(hovermode="x unified",
+                              yaxis_title=f"% de dias com a emoção (MM {emo_roll}d)",
+                              yaxis_range=[0, 100])
+            st.plotly_chart(fig, width="stretch")
+
+            # tabela de frequência total
+            freq = pd.DataFrame({
+                "emoção": chosen_emo,
+                "dias": [int(pf[e].sum()) for e in chosen_emo],
+                "% do período": [f"{pf[e].mean()*100:.1f}%" for e in chosen_emo],
+            })
+            st.caption(f"Vocabulário completo: {len(vocab_all)} emoções distintas. "
+                       f"Frequência das selecionadas no período ({len(df)} dias):")
+            st.dataframe(freq, width="stretch", hide_index=True)
+        else:
+            st.info("Selecione ao menos uma emoção.")
+
+# ------------------------------------------------ fases
+with tab_fases:
+    if not has_fase or df["fase_label"].nunique() < 2:
+        st.info("Nenhuma fase detectada nos dados do período selecionado.")
+    else:
+        report_html = build_phase_report(df, registry=COLUMN_REGISTRY or None)
+        st.components.v1.html(report_html, height=1200, scrolling=True)
+        st.download_button(
+            "⬇ Baixar relatório HTML",
+            report_html.encode("utf-8"),
+            "relatorio_fases.html",
+            "text/html",
+        )
+
 # ------------------------------------------------ registro de colunas
 with tab_reg:
     st.markdown("##### Registro de colunas")
@@ -1112,20 +1284,17 @@ with tab_reg:
         "**numeric**, **med** ou **bool** passam a ser tratadas automaticamente "
         "(parsing, gráficos genéricos, regressão) sem editar código. "
         "**duration**/**clock** e visões especiais seguem no código. "
-        "O palpite vem pré-preenchido — revise e salve."
+        "O palpite vem pré-preenchido — revise e salve. "
+        "`enabled` desligado tira a coluna dos genéricos; `kind=ignore` idem."
     )
 
     if df_raw is None:
         st.warning("Sem CSV cru disponível pra varredura. Recarregue a planilha.")
     else:
-        # monta a grade: merge varredura + registro salvo
         merged = rg.merge_scan_with_registry(df_raw, COLUMN_REGISTRY)
-
-        # separa o que é editável (in_registry) do que é read-only (duration/clock/estrutural)
         editable = [m for m in merged if m.get("in_registry", True)]
         locked = [m for m in merged if not m.get("in_registry", True)]
 
-        # DataFrame pra data_editor
         grid = pd.DataFrame([{
             "coluna": m["col"],
             "label": m.get("label", m["col"]),
@@ -1162,7 +1331,7 @@ with tab_reg:
             key="registry_editor",
         )
 
-        cbtn1, cbtn2, cbtn3 = st.columns([1, 1, 2])
+        cbtn1, cbtn2, _ = st.columns([1, 1, 2])
         if cbtn1.button("💾 Salvar registro", type="primary"):
             new_reg = []
             for _, row in edited.iterrows():
@@ -1189,11 +1358,13 @@ with tab_reg:
         if locked:
             st.markdown("###### Colunas fora do registro (tratadas no código)")
             st.caption(
-                "duration/clock/estruturais — aparecem aqui só pra referência; "
-                "seu comportamento está hardcoded (estágios de sono, wrap de madrugada, etc.)."
+                "duration/clock/estruturais — referência apenas; comportamento hardcoded "
+                "(estágios de sono, wrap de madrugada, etc.)."
             )
-            lock_df = pd.DataFrame([{
-                "coluna": m["col"], "tipo": m.get("kind", ""),
-                "motivo": m.get("reason", ""),
-            } for m in locked])
-            st.dataframe(lock_df, width="stretch", hide_index=True)
+            st.dataframe(
+                pd.DataFrame([{
+                    "coluna": m["col"], "tipo": m.get("kind", ""),
+                    "motivo": m.get("reason", ""),
+                } for m in locked]),
+                width="stretch", hide_index=True,
+            )
