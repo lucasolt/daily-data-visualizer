@@ -17,7 +17,6 @@ SCORE_COLS = [
     "cognition_score",
     "attention_score",
     "mood_score",
-    "drive_score",
     "fluencia_verbal_espontaneidade_social",
 ]
 
@@ -26,7 +25,6 @@ SCORE_LABELS = {
     "cognition_score": "Cognição",
     "attention_score": "Atenção",
     "mood_score": "Humor",
-    "drive_score": "Iniciativa/Drive",
     "fluencia_verbal_espontaneidade_social": "Fluência/espontaneidade",
 }
 
@@ -184,10 +182,12 @@ def med_varies_within_use(df: pd.DataFrame, med: str, min_used: int = 4) -> bool
     return used.nunique() >= 2 and len(used) >= min_used
 
 
-def active_meds(df: pd.DataFrame, min_days: int = 1) -> list[str]:
-    """Medicações com uso (>0) em pelo menos `min_days` dias."""
+def active_meds(df: pd.DataFrame, min_days: int = 1, med_cols=None) -> list[str]:
+    """Medicações com uso (>0) em pelo menos `min_days` dias.
+    med_cols: lista de colunas de medicação a considerar; None -> constante MED_COLS."""
+    cols = med_cols if med_cols is not None else MED_COLS
     out = []
-    for col in MED_COLS:
+    for col in cols:
         if col in df.columns and (df[col].fillna(0) > 0).sum() >= min_days:
             out.append(col)
     return out
@@ -245,19 +245,39 @@ def emotion_presence_frame(df: pd.DataFrame, emotions: list[str]) -> pd.DataFram
     return out[emotions] if emotions else out
 
 
-def prepare(df: pd.DataFrame) -> pd.DataFrame:
+def _groups_from_registry(registry):
+    """(numeric_comma_cols, med_cols) derivados do registro.
+    registry None/vazio -> (None, None), sinalizando ao prepare que use as constantes.
+    """
+    if not registry:
+        return None, None
+    import registry as rg
+    rmap = rg.registry_to_map(registry)
+    return rg.numeric_comma_cols(rmap), rg.meds(rmap)
+
+
+def prepare(df: pd.DataFrame, registry=None) -> pd.DataFrame:
+    """registry: lista de entradas de schema (ver registry.py). None/vazio =>
+    usa as constantes hardcoded (comportamento idêntico à versão anterior).
+    Quando presente, score/numeric/med do registro definem o parsing genérico
+    (vírgula->float e fillna-0 em med). duration/clock seguem nas constantes."""
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
 
     df["date"] = pd.to_datetime(df["date"], format="%d/%m/%Y", errors="coerce")
     df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
-    for col in NUMERIC_COMMA_COLS:
+    # grupos de parsing: do registro se houver, senão constantes
+    _num_cols, _med_cols = _groups_from_registry(registry)
+    if _num_cols is None:
+        _num_cols, _med_cols = NUMERIC_COMMA_COLS, MED_COLS
+
+    for col in _num_cols:
         if col in df.columns:
             df[col] = _to_num(df[col])
 
     # decisão explícita: 0 e missing são equivalentes (= não-uso) para fármacos.
-    for col in MED_COLS:
+    for col in _med_cols:
         if col in df.columns:
             df[col] = df[col].fillna(0.0)
 
