@@ -9,10 +9,14 @@ import pandas as pd
 
 import data_prep as dp
 
+try:
+    import registry as rg
+except Exception:  # registry é opcional; sem ele, comporta como antes
+    rg = None
+
 # ---------------------------------------------------------------- helpers
 
 def _fmt_h(h: float) -> str:
-    """Horas decimais → HH:MM. NaN → '—'."""
     if pd.isna(h):
         return "—"
     sign = "-" if h < 0 else ""
@@ -40,7 +44,6 @@ def _safe_mean(s: pd.Series):
     return float(v.mean()) if len(v) else float("nan")
 
 def _pct_nonzero(s: pd.Series, n_days: int) -> str:
-    """Conta dias > 0 e retorna 'N (X%)'."""
     cnt = int((s.fillna(0) > 0).sum())
     if cnt == 0:
         return "—"
@@ -48,7 +51,6 @@ def _pct_nonzero(s: pd.Series, n_days: int) -> str:
     return f"{cnt} ({pct:.1f}%)"
 
 def _bg_color(val, nums, direction):
-    """Calcula cor de fundo rgba para heat coloring entre fases."""
     valid = [n for n in nums if not math.isnan(n)]
     if len(valid) < 2:
         return ""
@@ -60,7 +62,6 @@ def _bg_color(val, nums, direction):
     t = (val - mn) / (mx - mn)
     if direction == "lower":
         t = 1 - t
-    # verde se bom, vermelho se ruim
     if t >= 0.5:
         alpha = (t - 0.5) * 2 * 0.28
         return f"rgba(29,158,117,{alpha:.3f})"
@@ -71,20 +72,25 @@ def _bg_color(val, nums, direction):
 
 # ---------------------------------------------------------------- geração
 
-def build_phase_report(df: pd.DataFrame) -> str:
-    """Retorna string HTML do relatório de sono/comportamento por fase."""
+def build_phase_report(df: pd.DataFrame, registry=None) -> str:
+    """Retorna string HTML do relatório de sono/comportamento por fase.
+
+    registry: lista de entradas de schema (ver registry.py). Quando presente,
+    os scores subjetivos e os meds vêm do registro (scores extras como drive
+    aparecem; meds extras ganham pill de presença genérica). None => constantes,
+    comportamento idêntico ao anterior.
+    """
 
     if "fase_label" not in df.columns or df["fase_label"].nunique() < 1:
         return "<p style='color:#9aa7b5'>Sem dados de fase disponíveis.</p>"
 
-    # limiar de inclusão de fármaco nos pills: usado em > PILL_MIN_PCT dos dias da fase
     PILL_MIN_PCT = 0.50
 
+    rmap = (rg.registry_to_map(registry) if (rg and registry) else {})
+
     phases = dp.fase_order(df["fase_label"].unique())
-    # remove "(sem fase)" se houver apenas ela
     phases = [p for p in phases if p != "(sem fase)"] or phases
 
-    # ---- metadados por fase ----
     phase_data = {}
     for ph in phases:
         sub = df[df["fase_label"] == ph].copy()
@@ -93,7 +99,6 @@ def build_phase_report(df: pd.DataFrame) -> str:
     def col(col_name, ph):
         return phase_data[ph].get(col_name, pd.Series(dtype=float))
 
-    # header: datas e n dias
     def phase_header(ph):
         sub = phase_data[ph]
         n = len(sub)
@@ -103,13 +108,10 @@ def build_phase_report(df: pd.DataFrame) -> str:
 
     headers = [phase_header(ph) for ph in phases]
 
-    # ---- seções de dados ----
-    # Cada seção: lista de linhas; cada linha: (label, [values_per_phase], [nums], direction, format_fn)
     def build_section(title, rows):
         return {"title": title, "rows": rows}
 
     def time_row(label, col_name, direction, use_mean_aux=True):
-        """Para colunas de horário — mostra mediana + média auxiliar."""
         medians = [_safe_median(col(col_name, ph)) for ph in phases]
         means   = [_safe_mean(col(col_name, ph))   for ph in phases]
         vals    = [_fmt_h(m) for m in medians]
@@ -131,7 +133,6 @@ def build_phase_report(df: pd.DataFrame) -> str:
                 "nums": nums, "dir": direction, "type": "single"}
 
     def pct_row(label, col_name, direction):
-        """Percentagem calculada de colunas _h relativas."""
         rows_out = []
         for ph in phases:
             sub = phase_data[ph]
@@ -146,7 +147,6 @@ def build_phase_report(df: pd.DataFrame) -> str:
                 "nums": rows_out, "dir": direction, "type": "single"}
 
     def ctx_row(label, col_name):
-        """Dias > 0 com contagem e percentagem."""
         vals = []
         nums = []
         for ph in phases:
@@ -163,72 +163,45 @@ def build_phase_report(df: pd.DataFrame) -> str:
         return {"label": label, "vals": vals, "aux": None,
                 "nums": nums, "dir": "lower", "type": "single"}
 
-    def dual_num_row(label, col_name, direction, decimals=1, suffix="",
-                     primary="mean", aux="median", min_cov=None):
-        """Linha de duas estatísticas: uma principal (grande) + uma auxiliar (pequena).
+    def dual_num_row(label, col_name, direction, decimals=1, suffix=""):
+        medians = [_safe_median(col(col_name, ph)) for ph in phases]
+        means   = [_safe_mean(col(col_name, ph))   for ph in phases]
+        vals = [_fmt_val(n, decimals, suffix) for n in medians]
+        aux  = [f"μ {_fmt_val(m, decimals, suffix)}" for m in means]
+        return {"label": label, "vals": vals, "aux": aux,
+                "nums": medians, "dir": direction, "type": "dual"}
 
-        primary : "median" ou "mean" — qual estatística vira o valor principal.
-        aux     : "mean", "median" ou None — qual vai na linha auxiliar (None = sem auxiliar).
-                  Prefixo segue a escolha: 'μ' para média, 'md' para mediana.
-        min_cov : se definido (ex. 0.20), suprime (→ NaN) a célula de uma fase cuja
-                  cobertura — dias com valor não-nulo / dias da fase — for < min_cov.
-                  Célula suprimida não mostra valor nem auxiliar e não entra no
-                  cálculo de cor (_bg_color), como se aquela fase não existisse pra
-                  esta linha.
-
-        DEFAULT (primary="median", aux="mean") reproduz o comportamento histórico:
-        mediana como principal, μ média como auxiliar. Os scores subjetivos
-        sobrescrevem para primary="mean" (ver seção de scores abaixo).
-        """
-        stat = {"mean": _safe_mean, "median": _safe_median}
-        prim_vals = [stat[primary](col(col_name, ph)) for ph in phases]
-        aux_vals  = [stat[aux](col(col_name, ph)) for ph in phases] if aux else None
-
-        if min_cov is not None:
-            for i, ph in enumerate(phases):
-                sub = phase_data[ph]
-                n = len(sub)
-                cov = (col(col_name, ph).notna().sum() / n) if n else 0.0
-                if cov < min_cov:
-                    prim_vals[i] = float("nan")
-                    if aux_vals is not None:
-                        aux_vals[i] = float("nan")
-
-        vals = [_fmt_val(v, decimals, suffix) for v in prim_vals]
-        aux_out = None
-        if aux:
-            pre = "μ" if aux == "mean" else "md"
-            aux_out = [f"{pre} {_fmt_val(a, decimals, suffix)}" for a in aux_vals]
-        return {"label": label, "vals": vals, "aux": aux_out,
-                "nums": prim_vals, "dir": direction, "type": "dual"}
-
-    # scores subjetivos: principal = MÉDIA, auxiliar = md mediana.
-    # (decisão explícita — diferente das demais métricas, que usam mediana como principal.)
-    # min_cov=0.20: fase com menos de 20% dos dias preenchidos não exibe score
-    # (nem entra no cálculo de cor das outras fases).
-    SCORE_MIN_COV = 0.20
+    # ---- scores: do registro se houver, senão constantes ----
     score_rows = []
-    score_map = {
-        "mood_score": ("Humor", "higher"),
-        "energy_score": ("Energia", "higher"),
-        "cognition_score": ("Cognição", "higher"),
-        "attention_score": ("Atenção", "higher"),
-        "fluencia_verbal_espontaneidade_social": ("Fluência verbal", "higher"),
-        "drive_score": ("Iniciativa/Drive", "higher"),
-    }
-    for col_name, (label, direction) in score_map.items():
-        if col_name in df.columns:
-            score_rows.append(
-                dual_num_row(label, col_name, direction,
-                             primary="mean", aux="median", min_cov=SCORE_MIN_COV)
-            )
+    if rmap and rg and rg.scores(rmap):
+        # ordem do registro; label e direção vêm de lá
+        score_specs = []
+        labels = rg.score_labels(rmap)
+        dirs = rg.score_directions(rmap)
+        for c in rg.scores(rmap):
+            if c in df.columns:
+                d = dirs.get(c, "none")
+                d = d if d in ("higher", "lower") else None
+                score_specs.append((c, labels.get(c, c), d))
+    else:
+        score_specs = [
+            ("mood_score", "Humor", "higher"),
+            ("energy_score", "Energia", "higher"),
+            ("cognition_score", "Cognição", "higher"),
+            ("attention_score", "Atenção", "higher"),
+            ("fluencia_verbal_espontaneidade_social", "Fluência verbal", "higher"),
+        ]
+        score_specs = [(c, l, d) for c, l, d in score_specs if c in df.columns]
+
+    for col_name, label, direction in score_specs:
+        score_rows.append(dual_num_row(label, col_name, direction))
 
     sections = [
-        build_section("Horários  (mediana principal · μ média)", [
+        build_section("Horários — mediana (principal) · μ média", [
             time_row("Bed time",  "bed_time_h",  "lower"),
             time_row("Wake time", "wake_time_h", "lower"),
         ]),
-        build_section("Duração (média principal · md mediana)", [
+        build_section("Duração (mediana HH:MM)", [
             dur_row("Sleep duration",  "sleep_duration_h", "higher"),
             dur_row("In bed",          "inbed_duration_h", None),
             dur_row("Deep sleep",      "deep_sleep_h",     "higher"),
@@ -242,36 +215,34 @@ def build_phase_report(df: pd.DataFrame) -> str:
             pct_row("REM %",    "rem_sleep_h",   "higher"),
             pct_row("Deep %",   "deep_sleep_h",  "higher"),
         ]),
-        build_section("Perturbações (média principal · md mediana)", [
+        build_section("Perturbações (mediana)", [
             dual_num_row("Sleep latency (min) *", "sleep_latency_estimate_minutes", "lower"),
             dual_num_row("Restlessness (min)",    "restlessness_mins",   "lower"),
             dual_num_row("Interruption (min)",    "interruption_mins",   "lower"),
             dual_num_row("Full awakenings",       "full_awakenings",     "lower", 2),
         ]),
-        build_section("Cardíaco (média principal · md mediana)", [
+        build_section("Cardíaco (mediana)", [
             dual_num_row("Avg BPM", "avg_bpm", "lower", 1),
             dual_num_row("VFC",     "VFC",     "higher", 1),
         ]),
-        build_section("Atividade (média principal · md mediana)", [
+        build_section("Atividade (mediana)", [
             dual_num_row("Passos",          "steps",        "higher", 0),
             dual_num_row("Exercício (min)", "exercise_mins","higher", 0),
         ]),
     ]
     if score_rows:
-        sections.insert(0, build_section(
-            "Scores subjetivos (média principal · md mediana)", score_rows))
+        sections.insert(0, build_section("Scores subjetivos (mediana)", score_rows))
 
     ctx_section = build_section("Contexto", [
         ctx_row("Dias fumados",  "fumou"),
         ctx_row("Dias de férias","ferias"),
     ])
 
-    # ---- regime medicamentoso por fase ----
-    # colunas manhã/tarde excluídas — só totais são exibidos
     MED_EXCLUDE = {
         "venvase_morning_mg", "venvanse_evening_mg",
         "metilfenidato_mg", "metilfenidato_evening_mg",
     }
+    # cartões de cor/label por fármaco conhecido (tratamento "de luxo")
     MED_COLORS = {
         "venvanse_mg_total":      ("#B5D4F4", "#0C447C", "Lisdexanfetamina"),
         "bupropiona_mg":          ("#C0DD97", "#27500A", "Bupropiona"),
@@ -288,29 +259,46 @@ def build_phase_report(df: pd.DataFrame) -> str:
         "metilfenidato_mg_total": ("#FFD6A5", "#7A3900", "Metilfenidato"),
         "vitamina_d_ug":          ("#FFFACD", "#5C5200", "Vit D"),
     }
+    # cor default pra pill genérica de med novo (sem cartão dedicado)
+    GENERIC_PILL = ("#2b333d", "#c7d0da")
+
+    # lista de meds a considerar: do registro se houver, senão chaves de MED_COLORS
+    if rmap and rg and rg.meds(rmap):
+        med_cols_report = [c for c in rg.meds(rmap) if c not in MED_EXCLUDE]
+    else:
+        med_cols_report = [c for c in MED_COLORS.keys()]
 
     def med_pills_html(ph, min_pct: float = PILL_MIN_PCT):
         sub = phase_data[ph]
         n_phase = len(sub)
         threshold = max(1, n_phase * min_pct)
         parts = []
-        for col_name, (bgc, fgc, label) in MED_COLORS.items():
-            if col_name in sub.columns and (sub[col_name] > 0).sum() >= threshold:
-                # mediana da dose nos dias de uso (dose>0); regime estável por fase → vira a dose real
-                used = sub[col_name][sub[col_name] > 0]
-                dose = used.median()
-                dose_txt = ""
-                if not pd.isna(dose) and dose > 0:
-                    dnum = int(round(dose)) if float(dose).is_integer() or abs(dose - round(dose)) < 0.05 else round(dose, 1)
-                    dose_txt = f" {dnum} mg"
-                parts.append(
-                    f'<span class="mt" style="background:{bgc};color:{fgc}">{label}{dose_txt}</span>'
-                )
+        for col_name in med_cols_report:
+            if col_name not in sub.columns:
+                continue
+            if (sub[col_name] > 0).sum() < threshold:
+                continue
+            # cartão dedicado, ou pill genérica (cor do registro se houver)
+            if col_name in MED_COLORS:
+                bgc, fgc, label = MED_COLORS[col_name]
+            else:
+                label = (rmap.get(col_name, {}).get("label")
+                         if rmap else None) or dp.SCORE_LABELS.get(col_name, col_name)
+                reg_color = rmap.get(col_name, {}).get("color") if rmap else ""
+                bgc = reg_color or GENERIC_PILL[0]
+                fgc = GENERIC_PILL[1]
+            used = sub[col_name][sub[col_name] > 0]
+            dose = used.median()
+            dose_txt = ""
+            if not pd.isna(dose) and dose > 0:
+                dnum = int(round(dose)) if float(dose).is_integer() or abs(dose - round(dose)) < 0.05 else round(dose, 1)
+                dose_txt = f" {dnum} mg"
+            parts.append(
+                f'<span class="mt" style="background:{bgc};color:{fgc}">{label}{dose_txt}</span>'
+            )
         return "<br>".join(parts) if parts else "<span style='color:#666'>—</span>"
 
     def med_dose_html(ph, col_name):
-        """Média diária sobre TODOS os dias da fase (dias sem uso entram como 0).
-        Exposição média/dia — distinto da titulação (só dias de uso) usada nas correlações."""
         sub = phase_data[ph]
         if col_name not in sub.columns:
             return "—"
@@ -319,19 +307,14 @@ def build_phase_report(df: pd.DataFrame) -> str:
             return "—"
         return _fmt_val(s.mean(), 1, " mg")
 
-    # ---- renderização HTML ----
     n_phases = len(phases)
     col_w = f"{100/(n_phases+1):.1f}%"
 
     css = """
 <style>
 :root{
-  --bg:#0b0d10;
-  --panel:#14181d;
-  --panel-2:#1b2128;
-  --border:#2b333d;
-  --text:#e7edf5;
-  --muted:#9aa7b5;
+  --bg:#0b0d10; --panel:#14181d; --panel-2:#1b2128; --border:#2b333d;
+  --text:#e7edf5; --muted:#9aa7b5;
 }
 *{box-sizing:border-box;}
 body{margin:0;padding:0;background:var(--bg);color:var(--text);
@@ -387,22 +370,18 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
             rows_html += '</tr>\n'
         return rows_html
 
-    # assemble
     th_row = '<tr><th class="lbl"></th>' + "".join(th_html(*h) for h in headers) + "</tr>"
 
     tbody = ""
-    # contexto primeiro
     tbody += render_section(ctx_section)
 
-    # regime meds
     tbody += f'<tr class="sh"><td colspan="{n_phases+1}">Regime medicamentoso (fármacos usados em mais de {PILL_MIN_PCT*100:.0f}% dos dias)</td></tr>\n'
     tbody += '<tr><td class="lbl" style="vertical-align:top;padding:8px 10px;border-bottom:0"></td>'
     for ph in phases:
         tbody += f'<td style="text-align:left;vertical-align:top;padding:8px 10px;border-bottom:0">{med_pills_html(ph)}</td>'
     tbody += '</tr>\n'
 
-    # doses dos principais meds
-    # só fármacos de dose variável; média sobre todos os dias da fase (inclui zeros)
+    # doses dos principais meds — segue hardcoded (fora do escopo do registro)
     DOSE_ROWS = [
         ("venvanse_mg_total",     "Lisdexanfetamina (média/dia, todos os dias)"),
         ("zolpidem_mg_total",     "Zolpidem (média/dia, todos os dias)"),
@@ -420,7 +399,6 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
             tbody += f'<td class="dose">{med_dose_html(ph, col_name)}</td>'
         tbody += '</tr>\n'
 
-    # dados principais
     for sec in sections:
         tbody += render_section(sec)
 
@@ -435,9 +413,9 @@ tr.sh>td{background:var(--panel-2);font-size:10px;font-weight:700;
   <div class="legend">
     <span><span class="leg-box" style="background:rgba(29,158,117,.28)"></span>melhor valor relativo</span>
     <span><span class="leg-box" style="background:rgba(216,90,48,.28)"></span>pior valor relativo</span>
-    <span>· intensidade proporcional ao desvio da mediana global · horários: mediana (principal), μ média · scores subjetivos: média (principal), md mediana</span>
+    <span>· intensidade proporcional ao desvio da mediana global · horários: mediana (principal), μ média</span>
   </div>
-  <div class="fn">* Sleep latency estimada — baixa confiabilidade · doses: média dos dias em uso (dose&gt;0) · scores com &lt; 20% dos dias preenchidos na fase são omitidos</div>
+  <div class="fn">* Sleep latency estimada — baixa confiabilidade · doses: média dos dias em uso (dose&gt;0)</div>
 </div>"""
 
     return html
